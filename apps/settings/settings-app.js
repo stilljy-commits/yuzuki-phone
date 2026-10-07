@@ -3382,6 +3382,50 @@ export class SettingsApp {
                                 </div>
                             </details>
 
+                            <details data-tts-fold-key="phone-tts-volc-pool-section-open" style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
+                                <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
+                                    <span>豆包音色池 · 批量导入 / 自动分配</span>
+                                    ${SETTINGS_FOLD_ARROW_HTML}
+                                </summary>
+                                <div style="padding: 10px 10px 4px;">
+                                    <div class="setting-desc" style="margin-bottom: 10px;">批量粘贴音色，每行一条：<code>音色ID|名称|性别</code>（性别 f=女 / m=男 / n=中性，可省略）。开启自动分配后，未绑定专属音色的联系人会按「角色性别 + 名字哈希」从池内稳定分配音色（同人同声；已手动绑定音色的角色不受影响）。兼容「瑟瑟小手机」音色池导出格式，可直接整段粘贴。</div>
+                                    <div class="setting-item setting-toggle" style="margin-top: 0;">
+                                        <div>
+                                            <div class="setting-label">自动分配音色</div>
+                                            <div class="setting-desc">关闭后只使用手动绑定音色与全局兜底音色</div>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="phone-tts-volc-auto-assign" ${String(this.storage.get('phone-tts-volc-auto-assign') ?? '1') !== '0' ? 'checked' : ''}>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div style="font-size: 13px; font-weight: 700; color: #333; margin-bottom: 8px;">批量导入</div>
+                                        <textarea id="phone-tts-volc-pool-import" rows="5" placeholder="zh_female_vv_uranus_bigtts|薇薇|f&#10;saturn_zh_female_cancan_tob|灿灿|f&#10;zh_male_xxx_uranus_bigtts|某某|m" style="width: 100%; min-height: 72px; padding: 8px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 12px; background: #fafafa; box-sizing: border-box; resize: vertical; font-family: monospace; line-height: 1.5;"></textarea>
+                                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
+                                            <button id="phone-tts-volc-pool-import-btn" style="height: 30px; border: 1px solid #1677ff; border-radius: 8px; background: #fff; color: #1677ff; font-size: 12px; cursor: pointer;">导入（追加）</button>
+                                            <button id="phone-tts-volc-pool-replace-btn" style="height: 30px; border: 1px solid #d8d8d8; border-radius: 8px; background: #fafafa; color: #222; font-size: 12px; cursor: pointer;">覆盖导入</button>
+                                        </div>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                            <div style="font-size: 13px; font-weight: 700; color: #333;">音色池</div>
+                                            <span id="phone-tts-volc-pool-stats" style="font-size: 11px; color: #999;"></span>
+                                        </div>
+                                        <div id="phone-tts-volc-pool-list" style="max-height: 240px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px;"></div>
+                                        <button id="phone-tts-volc-pool-clear" style="width: 100%; height: 30px; margin-top: 8px; border: 1px solid #ffd6d6; border-radius: 8px; background: #fff; color: #ff3b30; font-size: 12px; cursor: pointer;">清空音色池</button>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                                            <div style="font-size: 13px; font-weight: 700; color: #333;">角色分配预览</div>
+                                            <button id="phone-tts-volc-pool-reassign" style="height: 26px; padding: 0 10px; border: 1px solid #1677ff; border-radius: 8px; background: #fff; color: #1677ff; font-size: 11px; cursor: pointer;">全部重新分配</button>
+                                        </div>
+                                        <div class="setting-desc" style="margin-bottom: 8px;">显示微信联系人的当前生效音色（含自动分配结果）；「全部重新分配」会清除分配记录并按当前音色池重新挑选。</div>
+                                        <div id="phone-tts-volc-pool-roles" style="max-height: 240px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px;"></div>
+                                    </div>
+                                </div>
+                            </details>
+
                             <details data-tts-fold-key="phone-tts-fallback-section-open" ${isTtsFallbackSectionOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
                                 <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
                                     <span>全局兜底音色</span>
@@ -10878,6 +10922,182 @@ export class SettingsApp {
                 this.phoneShell.showNotification('已删除', `豆包音色「${currentVoice}」已移除`, '🗑️');
             });
         }
+
+        // ===== 豆包音色池 · 批量导入 / 自动分配（补丁新增）=====
+        const VOLC_POOL_KEY = 'phone-tts-volc-voice-pool';
+        const VOLC_PICK_KEY = 'phone-tts-volc-auto-pick';
+        const readVolcPool = () => {
+            try {
+                const parsed = JSON.parse(this.storage.get(VOLC_POOL_KEY) || '[]');
+                return Array.isArray(parsed) ? parsed.filter(v => v && typeof v === 'object' && String(v.id || '').trim()) : [];
+            } catch (e) { return []; }
+        };
+        const writeVolcPool = async (pool) => { await this.storage.set(VOLC_POOL_KEY, JSON.stringify(pool)); };
+        const parseVolcPoolGender = (raw) => {
+            const g = String(raw || '').trim().toLowerCase();
+            if (['f', 'female', '女', '女性'].includes(g)) return 'f';
+            if (['m', 'male', '男', '男性'].includes(g)) return 'm';
+            return 'n';
+        };
+        const volcGenderLabel = (g) => (g === 'f' ? '女' : (g === 'm' ? '男' : '中性'));
+        const parseVolcPoolLine = (line) => {
+            const raw = String(line || '').trim();
+            if (!raw || raw.startsWith('#') || raw.startsWith('//')) return null;
+            const parts = raw.split(/[|｜]/).map(s => s.trim()).filter(Boolean);
+            if (!parts.length) return null;
+            return { id: parts[0], label: parts[1] || '', gender: parseVolcPoolGender(parts[2] || '') };
+        };
+        const getWechatData = () => window.VirtualPhone?.cachedWechatData || window.VirtualPhone?.wechatApp?.wechatData || null;
+
+        const renderVolcPoolList = () => {
+            const pool = readVolcPool();
+            const listEl = document.getElementById('phone-tts-volc-pool-list');
+            const statsEl = document.getElementById('phone-tts-volc-pool-stats');
+            if (statsEl) {
+                const f = pool.filter(v => v.gender === 'f').length;
+                const m = pool.filter(v => v.gender === 'm').length;
+                const n = pool.length - f - m;
+                statsEl.textContent = pool.length ? `共 ${pool.length} 条 · 女 ${f} · 男 ${m} · 中性 ${n}` : '（空）';
+            }
+            if (!listEl) return;
+            if (!pool.length) {
+                listEl.innerHTML = '<div style="padding: 14px 10px; text-align: center; color: #999; font-size: 12px;">音色池为空：把音色批量粘贴到上方文本框后点「导入」</div>';
+                return;
+            }
+            listEl.innerHTML = pool.map((v, i) => `
+                <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f5f5f5; font-size: 12px;">
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtml(v.label || v.id)}</div>
+                        <div style="color: #bbb; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace;">${this._escapeHtml(v.id)}</div>
+                    </div>
+                    <span data-pool-gender="${i}" style="flex-shrink: 0; padding: 2px 8px; border-radius: 6px; background: ${v.gender === 'f' ? '#ffe3ec' : (v.gender === 'm' ? '#e3edff' : '#efefef')}; color: #666; font-size: 11px; cursor: pointer;">${volcGenderLabel(v.gender)}</span>
+                    <span data-pool-del="${i}" style="flex-shrink: 0; color: #ff3b30; font-size: 11px; cursor: pointer;">删除</span>
+                </div>
+            `).join('');
+        };
+
+        const renderVolcPoolRoles = () => {
+            const rolesEl = document.getElementById('phone-tts-volc-pool-roles');
+            if (!rolesEl) return;
+            const wechatData = getWechatData();
+            if (!wechatData?.data) {
+                rolesEl.innerHTML = '<div style="padding: 14px 10px; text-align: center; color: #999; font-size: 12px;">暂未读取到微信数据：先打开一次手机的微信页面，再回到设置查看分配结果</div>';
+                return;
+            }
+            const seen = new Set();
+            const roles = [];
+            for (const c of [...(wechatData.data.contacts || []), ...((wechatData.data.chats || []).filter(c => c && c.type !== 'group'))]) {
+                if (!c || seen.has(c.id)) continue;
+                seen.add(c.id);
+                roles.push(c);
+            }
+            if (!roles.length) {
+                rolesEl.innerHTML = '<div style="padding: 14px 10px; text-align: center; color: #999; font-size: 12px;">还没有联系人</div>';
+                return;
+            }
+            rolesEl.innerHTML = roles.map((c) => {
+                let resolved = null;
+                try { resolved = wechatData.resolveTtsVoiceByName?.(c.name, { includeChats: false }) || null; } catch (e) { resolved = null; }
+                const voice = String(resolved?.voice || '').trim();
+                const isAuto = !!(resolved && resolved.autoAssigned);
+                const bound = String((c.ttsVoices && (c.ttsVoices.volcengine || Object.values(c.ttsVoices || {})[0])) || c.ttsVoice || '').trim();
+                const tag = bound ? '已绑定' : (voice ? (isAuto ? '自动分配' : '兜底') : '无音色');
+                const tagColor = bound ? '#1677ff' : (isAuto ? '#18a058' : '#999');
+                return `
+                    <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f5f5f5; font-size: 12px;">
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="color: #333;">${this._escapeHtml(c.name || '未命名')}</div>
+                            <div style="color: #bbb; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace;">${voice ? this._escapeHtml(voice) : '（未分配，播放时走兜底）'}</div>
+                        </div>
+                        <span style="flex-shrink: 0; padding: 2px 8px; border-radius: 6px; background: #f5f5f5; color: ${tagColor}; font-size: 11px;">${tag}</span>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        const renderVolcPoolAll = () => { renderVolcPoolList(); renderVolcPoolRoles(); };
+        renderVolcPoolAll();
+
+        const volcAutoAssignToggle = document.getElementById('phone-tts-volc-auto-assign');
+        if (volcAutoAssignToggle) {
+            volcAutoAssignToggle.addEventListener('change', async (e) => {
+                await this.storage.set('phone-tts-volc-auto-assign', e.target.checked ? '1' : '0');
+                this.phoneShell.showNotification('自动分配', e.target.checked ? '已开启：未绑定音色的联系人将自动分配' : '已关闭', '🎙️');
+            });
+        }
+
+        const importVolcPool = async (replace) => {
+            const textarea = document.getElementById('phone-tts-volc-pool-import');
+            const raw = textarea?.value || '';
+            const incoming = [];
+            let bad = 0;
+            for (const line of raw.split(/\r?\n/)) {
+                const item = parseVolcPoolLine(line);
+                if (item) incoming.push(item); else if (line.trim()) bad += 1;
+            }
+            if (!incoming.length) {
+                this.phoneShell.showNotification('导入失败', '没有解析到有效音色（每行：音色ID|名称|性别）', '⚠️');
+                return;
+            }
+            const pool = replace ? [] : readVolcPool();
+            const byId = new Map(pool.map(v => [v.id, v]));
+            for (const item of incoming) byId.set(item.id, item);
+            const merged = [...byId.values()];
+            await writeVolcPool(merged);
+            if (textarea) textarea.value = '';
+            renderVolcPoolAll();
+            this.phoneShell.showNotification('导入成功', `${replace ? '覆盖导入' : '追加导入'} ${incoming.length} 条${bad ? `，跳过无效 ${bad} 行` : ''}，音色池共 ${merged.length} 条`, '✅');
+        };
+        document.getElementById('phone-tts-volc-pool-import-btn')?.addEventListener('click', () => importVolcPool(false));
+        document.getElementById('phone-tts-volc-pool-replace-btn')?.addEventListener('click', () => importVolcPool(true));
+
+        document.getElementById('phone-tts-volc-pool-clear')?.addEventListener('click', async () => {
+            const pool = readVolcPool();
+            if (!pool.length) return;
+            if (!confirm(`确定清空音色池（共 ${pool.length} 条）？已自动分配的角色会改走兜底音色。`)) return;
+            await writeVolcPool([]);
+            await this.storage.set(VOLC_PICK_KEY, '{}');
+            renderVolcPoolAll();
+            this.phoneShell.showNotification('已清空', '音色池已清空', '🗑️');
+        });
+
+        const volcPoolListEl = document.getElementById('phone-tts-volc-pool-list');
+        if (volcPoolListEl) {
+            volcPoolListEl.addEventListener('click', async (e) => {
+                const genderEl = e.target.closest('[data-pool-gender]');
+                if (genderEl) {
+                    const pool = readVolcPool();
+                    const idx = Number(genderEl.dataset.poolGender);
+                    if (!pool[idx]) return;
+                    pool[idx].gender = pool[idx].gender === 'f' ? 'm' : (pool[idx].gender === 'm' ? 'n' : 'f');
+                    await writeVolcPool(pool);
+                    renderVolcPoolAll();
+                    return;
+                }
+                const delEl = e.target.closest('[data-pool-del]');
+                if (delEl) {
+                    const pool = readVolcPool();
+                    const idx = Number(delEl.dataset.poolDel);
+                    const item = pool[idx];
+                    if (!item) return;
+                    if (!confirm(`删除音色「${item.label || item.id}」？`)) return;
+                    pool.splice(idx, 1);
+                    await writeVolcPool(pool);
+                    renderVolcPoolAll();
+                }
+            });
+        }
+
+        document.getElementById('phone-tts-volc-pool-reassign')?.addEventListener('click', async () => {
+            const pool = readVolcPool();
+            if (!pool.length) {
+                this.phoneShell.showNotification('提示', '音色池为空，先导入音色再重新分配', '⚠️');
+                return;
+            }
+            await this.storage.set(VOLC_PICK_KEY, '{}');
+            renderVolcPoolRoles();
+            this.phoneShell.showNotification('重新分配', '已清除分配记录：各角色将按当前音色池重新自动分配', '🎲');
+        });
 
         // 清空当前角色数据
         document.getElementById('clear-current-data')?.addEventListener('click', () => {
