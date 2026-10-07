@@ -2633,13 +2633,100 @@ export class WechatData {
         const provider = globalProviderVoice ? globalProvider : (boundProvider || globalProvider);
         const providerVoice = String(providerVoices?.[provider] || '').trim();
         const hasProviderVoiceConfig = Object.values(providerVoices).some(value => String(value || '').trim());
-        const voice = providerVoice || (hasProviderVoiceConfig ? '' : String(contact?.ttsVoice || '').trim());
+        const baseVoice = providerVoice || (hasProviderVoiceConfig ? '' : String(contact?.ttsVoice || '').trim());
+        let voice = baseVoice;
+        let autoAssignedVoice = '';
+        if (!voice && provider === 'volcengine') {
+            autoAssignedVoice = this._resolveVolcPoolAutoVoice(contact, name);
+            if (autoAssignedVoice) voice = autoAssignedVoice;
+        }
         return {
             contact,
             voice,
             provider,
+            autoAssigned: Boolean(autoAssignedVoice),
             languageBoost: String(contact?.ttsLanguageBoost || 'auto').trim() || 'auto'
         };
+    }
+
+    // ===== 豆包音色池 · 批量导入 + 自动分配（补丁新增）=====
+    _readVolcVoicePool() {
+        try {
+            const parsed = JSON.parse(this.storage?.get?.('phone-tts-volc-voice-pool') || '[]');
+            return Array.isArray(parsed)
+                ? parsed
+                    .filter(v => v && typeof v === 'object' && String(v.id || '').trim())
+                    .map(v => ({
+                        id: String(v.id).trim(),
+                        label: String(v.label || '').trim(),
+                        gender: (v.gender === 'f' || v.gender === 'm') ? v.gender : 'n'
+                    }))
+                : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _normalizeVolcPoolGender(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (raw === 'male' || raw === 'm' || raw === '男') return 'm';
+        if (raw === 'female' || raw === 'f' || raw === '女') return 'f';
+        return 'n';
+    }
+
+    _volcPoolHash(name) {
+        // FNV-1a 32位哈希：与名字绑定，保证同一角色永远分到同一个音色
+        let hash = 2166136261;
+        const raw = String(name || '');
+        for (let i = 0; i < raw.length; i++) {
+            hash ^= raw.charCodeAt(i);
+            hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        return hash;
+    }
+
+    _volcPoolPick(name, gender, pool) {
+        if (!Array.isArray(pool) || !pool.length) return '';
+        const bucket = this._normalizeVolcPoolGender(gender);
+        let candidates = pool;
+        if (bucket !== 'n') {
+            // 按角色性别分桶；对应性别桶为空时退回全池
+            const filtered = pool.filter(v => v.gender === bucket);
+            if (filtered.length) candidates = filtered;
+        }
+        if (!candidates.length) return '';
+        return candidates[this._volcPoolHash(String(name || '')) % candidates.length].id;
+    }
+
+    _resolveVolcPoolAutoVoice(contact, name) {
+        try {
+            if (String(this.storage?.get?.('phone-tts-volc-auto-assign') ?? '1') === '0') return '';
+            // 不给"我自己"自动分配（用户自己有专属配置入口）
+            if (contact && this.data?.userInfo && contact === this.data.userInfo) return '';
+            const pool = this._readVolcVoicePool();
+            if (!pool.length) return '';
+            const safeName = String(name || contact?.name || '').trim();
+            if (!safeName) return '';
+            let rawGender = contact?.gender || '';
+            if (this._normalizeVolcPoolGender(rawGender) === 'n' && typeof this.getContactGender === 'function') {
+                rawGender = this.getContactGender(contact?.id || safeName);
+            }
+            const gender = this._normalizeVolcPoolGender(rawGender);
+            const key = String(contact?.id || safeName).trim();
+            let pins = {};
+            try { pins = JSON.parse(this.storage?.get?.('phone-tts-volc-auto-pick') || '{}') || {}; } catch (e) { pins = {}; }
+            // 已钉住的结果优先（性别没变、音色还在池内），避免导入新音色后角色变声
+            const pin = pins[key];
+            if (pin && pin.v && pin.g === gender && pool.some(v => v.id === pin.v)) return String(pin.v);
+            const picked = this._volcPoolPick(safeName, gender, pool);
+            if (!picked) return '';
+            pins[key] = { v: picked, g: gender };
+            Promise.resolve(this.storage?.set?.('phone-tts-volc-auto-pick', JSON.stringify(pins))).catch(() => {});
+            return picked;
+        } catch (e) {
+            console.warn('⚠️ 豆包音色池自动分配失败:', e);
+            return '';
+        }
     }
 
     _getStoryTimeFallback() {
