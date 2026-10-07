@@ -1354,7 +1354,7 @@ if (window.GGP_Loaded) {
     // 🔥 按需加载设置模块
     async function loadSettingsModule() {
         if (!SettingsApp) {
-            const module = await import(`./apps/settings/settings-app.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_APP_SWIPE_REVISION}`);
+            const module = await import(`./apps/settings/settings-app.js?v=${ST_PHONE_VERSION}-vp1&r=${ST_PHONE_APP_SWIPE_REVISION}`);
             SettingsApp = module.SettingsApp;
         }
         return SettingsApp;
@@ -7291,7 +7291,7 @@ if (window.GGP_Loaded) {
         const conversationId = getCurrentTavernConversationIdentity(context);
 
         // 导入 WechatData（使用单例模式，确保消息被存储）
-        import('./apps/wechat/wechat-data.js?v=20261002-x-forward-card').then(module => {
+        import('./apps/wechat/wechat-data.js?v=20261007-voice-pool').then(module => {
             let wechatData;
 
             if (getCurrentTavernConversationIdentity() !== conversationId) {
@@ -7997,7 +7997,7 @@ if (window.GGP_Loaded) {
             const sourceConversationId = getCurrentTavernConversationIdentity();
 
             // 导入 WeChat 数据模块处理
-            import('./apps/wechat/wechat-data.js?v=20261002-x-forward-card').then(async module => {
+            import('./apps/wechat/wechat-data.js?v=20261007-voice-pool').then(async module => {
                 let wechatData;
                 if (getCurrentTavernConversationIdentity() !== sourceConversationId) {
                     console.warn('⚠️ 微信回复写入前会话已切换，丢弃旧会话回调');
@@ -8274,7 +8274,7 @@ if (window.GGP_Loaded) {
         if (!/"moments"\s*:/.test(sourceText)) return null;
 
         try {
-            const module = await import('./apps/wechat/wechat-data.js?v=20261002-x-forward-card');
+            const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
             if (!window.VirtualPhone) window.VirtualPhone = {};
 
             const context = getContext();
@@ -10106,7 +10106,7 @@ if (window.GGP_Loaded) {
 
                     let wechatData = window.VirtualPhone?.wechatApp?.wechatData || window.VirtualPhone?.cachedWechatData;
                     if (!wechatData) {
-                        const module = await import('./apps/wechat/wechat-data.js?v=20261002-x-forward-card');
+                        const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
                         wechatData = new module.WechatData(storage);
                     }
 
@@ -10555,7 +10555,7 @@ if (window.GGP_Loaded) {
                                     let wechatDataInstance = window.VirtualPhone?.wechatApp?.wechatData || window.VirtualPhone?.cachedWechatData;
                                     if (!wechatDataInstance && storage) {
                                         try {
-                                            const module = await import('./apps/wechat/wechat-data.js?v=20261002-x-forward-card');
+                                            const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
                                             if (!window.VirtualPhone) window.VirtualPhone = {};
                                             window.VirtualPhone.cachedWechatData = new module.WechatData(storage);
                                             wechatDataInstance = window.VirtualPhone.cachedWechatData;
