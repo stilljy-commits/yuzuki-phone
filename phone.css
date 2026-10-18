@@ -9609,8 +9609,17 @@ input:checked + .toggle-slider:before {
 .wechat-app .wechat-peer-first-bar { display:flex; justify-content:flex-end; padding:5px 10px 2px; }
 .wechat-app .wechat-peer-first-bar button { border:1px solid rgba(7,193,96,.2); border-radius:14px; padding:5px 11px; background:rgba(255,255,255,.78); color:#168b52; font-size:11px; cursor:pointer; }
 .wechat-app .wechat-peer-first-bar button:disabled { opacity:.5; cursor:default; }
-.wechat-app .wechat-voice-expression { display:flex; flex-wrap:wrap; gap:4px; margin:3px 0; line-height:1.4; }
-.wechat-app .wechat-voice-expression span { display:inline-block; padding:2px 6px; border-radius:5px; background:rgba(87,107,149,.1); color:#65738a; font-size:10px; overflow-wrap:anywhere; }
+.wechat-app .wechat-voice-expression { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:5px 0; line-height:1.6; min-width:0; }
+.wechat-app .wechat-voice-mood { display:inline-flex; align-items:center; gap:4px; padding:1px 7px; border:1px solid #ecd9ac; border-radius:10px; background:#fff6e4; color:#9a7427; font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+.wechat-app .wechat-voice-mood::before { content:'●'; font-size:8px; }
+.wechat-app .wechat-voice-delivery { color:#929292; font-size:12px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+.wechat-app .wechat-voice-card { min-width:0; max-width:100%; border-radius:12px; background:var(--wechat-voice-card-bg,#fff); box-shadow:0 1px 2px rgba(0,0,0,.06); overflow:hidden; gap:0 !important; align-items:stretch !important; }
+.wechat-app .wechat-voice-card > .voice-bubble-playable { width:100% !important; max-width:none !important; min-width:96px; justify-content:flex-start !important; gap:8px; border-radius:0 !important; background:transparent !important; box-shadow:none !important; border-bottom:1px solid rgba(0,0,0,.07); }
+.wechat-app .wechat-voice-card > .voice-bubble-playable::before,
+.wechat-app .wechat-voice-card > .voice-bubble-playable::after { display:none; }
+.wechat-app .wechat-voice-card .wechat-voice-expression { padding:8px 12px 0; margin:0; }
+.wechat-app .wechat-voice-card .wechat-voice-transcript { padding:6px 12px 12px !important; background:transparent !important; box-shadow:none !important; border-radius:0 !important; line-height:1.65 !important; }
+.wechat-app .edit-contact-tts-preview:disabled { opacity:.45; cursor:default !important; }
 .wechat-app .wechat-profile-field { margin:0 0 13px; }
 .wechat-app .wechat-profile-field-label { margin-bottom:3px; color:#8b8d94; font-size:11px; }
 .wechat-app .wechat-profile-field-value { color:#30323a; font-size:14px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }

@@ -16,6 +16,7 @@ import { ImageCropper } from '../settings/image-cropper.js?v=20261018-integratio
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
 import { ContactProfileView } from './contact-profile.js?v=20261018-integration';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-preview';
 
 export class ContactsView {
     constructor(wechatApp) {
@@ -595,6 +596,7 @@ export class ContactsView {
     }
 
     showEditContactPage(contactId, options = {}) {
+        this._ttsPreview?.stop();
         const contact = this.app.wechatData.getContact(contactId)
             || this.app.wechatData.findContactByNameLoose?.(contactId, { includeChats: false });
         if (!contact) return;
@@ -889,20 +891,23 @@ export class ContactsView {
                                         const activeText = option.id === currentTtsProvider ? '当前' : '';
                                         const poolOptions = option.id === 'volcengine' ? this._getVolcVoicePoolOptions(value) : '';
                                         return `
-                                            <label style="display: block;">
+                                            <div style="display: block;">
                                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
                                                     <span style="font-size: 11px; color: #666;">${option.label}</span>
                                                     ${activeText ? '<span style="font-size: 10px; color: #07c160;">当前</span>' : ''}
                                                 </div>
-                                                <input type="text" class="edit-contact-tts-provider-input" data-provider="${option.id}" placeholder="${option.placeholder}"
+                                                <div style="display:flex;gap:6px;align-items:center;">
+                                                <input type="text" class="edit-contact-tts-provider-input" data-provider="${option.id}" aria-label="${option.label}音色 ID" placeholder="${option.placeholder}"
                                                        value="${this._escapeAttr(value)}" style="
-                                                    width: 100%;
+                                                    flex: 1; min-width: 0;
                                                     padding: 8px 10px;
                                                     ${fieldStyle}
                                                     border-radius: 6px;
                                                     font-size: 12px;
                                                     box-sizing: border-box;
                                                 ">
+                                                <button type="button" class="edit-contact-tts-preview" data-provider="${option.id}" aria-label="试听${option.label}音色" aria-pressed="false" ${value ? '' : 'disabled'} style="flex-shrink:0;padding:8px 10px;border:1px solid #d8e3ef;border-radius:6px;background:#f2f7ff;color:#576b95;font-size:12px;cursor:pointer;">试听</button>
+                                                </div>
                                                 ${option.id === 'volcengine' ? `
                                                     <select id="edit-contact-volc-pool-select" aria-label="从豆包音色池选择" ${poolOptions ? '' : 'disabled'} style="
                                                         width: 100%; min-width: 0; height: 34px; margin-top: 6px; padding: 0 8px;
@@ -913,10 +918,11 @@ export class ContactsView {
                                                     </select>
                                                     <div style="font-size: 10px; color: #999; line-height: 1.4; margin-top: 4px;">用于豆包 / 火山引擎。选择后填入上方音色 ID，保存后优先于自动分配；清空上方音色 ID 可恢复自动分配。</div>
                                                 ` : ''}
-                                            </label>
+                                            </div>
                                         `;
                                     }).join('')}
                                 </div>
+                                <div id="edit-contact-tts-preview-status" role="status" style="font-size:11px;color:#576b95;line-height:1.5;margin-top:8px;">选好音色后可先试听，满意后点保存。</div>
                                 <div style="font-size: 10px; color: #ff3b30; margin-top: 5px;">群聊自动播放会按发送者的默认服务商和对应音色逐条合成；未指定服务商则跟随全局设置。</div>
                             </div>
                         </div>
@@ -1023,6 +1029,7 @@ export class ContactsView {
         };
 
         query('#back-from-edit-contact')?.addEventListener('click', async () => {
+            this._ttsPreview?.stop();
             await flushReferenceAutosave().catch(e => console.warn('个人形象设置返回前保存失败:', e));
             cleanupReferenceImages(pendingReferenceCleanup);
             returnFromEditContact();
@@ -1048,6 +1055,38 @@ export class ContactsView {
         });
         setTtsFoldExpanded(false);
 
+        const previewStatus = query('#edit-contact-tts-preview-status');
+        const preview = new TtsVoicePreview({
+            isActive: () => isVoicePreviewViewActive(currentView) && ttsFold?.classList.contains('is-open'),
+            watchActive: onChange => watchVoicePreviewView(currentView, onChange),
+            onState: ({ state, options: selected, error }) => {
+                if (previewStatus) previewStatus.textContent = error || (state === 'loading' ? `正在生成${selected.label}试听…` : state === 'playing' ? `正在试听${selected.label}，可点“停止”结束。` : '选好音色后可先试听，满意后点保存。');
+            },
+            onError: error => this.app.phoneShell.showNotification('试听失败', error.message, '⚠️')
+        });
+        this._ttsPreview = preview;
+        const refreshPreviewButtons = () => {
+            queryAll('.edit-contact-tts-preview').forEach(button => {
+                const input = query(`.edit-contact-tts-provider-input[data-provider="${CSS.escape(button.dataset.provider)}"]`);
+                button.disabled = !String(input?.value || '').trim();
+            });
+        };
+        queryAll('.edit-contact-tts-preview').forEach(button => {
+            button.onclick = () => {
+                const provider = button.dataset.provider;
+                const voice = String(query(`.edit-contact-tts-provider-input[data-provider="${CSS.escape(provider)}"]`)?.value || '').trim();
+                if (!voice) return;
+                const label = this._getTtsProviderOptions().find(option => option.id === provider)?.label || provider;
+                void preview.play({ provider, voice, label, languageBoost: query('#edit-contact-tts-language-select')?.value || 'auto', requestTimeoutMs: provider === 'nimo' ? 120000 : 30000 }, button);
+            };
+        });
+        queryAll('.edit-contact-tts-provider-input').forEach(input => {
+            input.addEventListener('input', () => { preview.stop(); refreshPreviewButtons(); });
+            input.addEventListener('change', () => { preview.stop(); refreshPreviewButtons(); });
+        });
+        query('#edit-contact-tts-provider-select')?.addEventListener('change', () => preview.stop());
+        query('#edit-contact-tts-language-select')?.addEventListener('change', () => preview.stop());
+
         // 下拉框选择后，自动把选中的音色填入输入框
         query('#edit-contact-tts-select')?.addEventListener('change', (e) => {
             const selectedVoice = e.target.value;
@@ -1057,6 +1096,8 @@ export class ContactsView {
                     || query('.edit-contact-tts-provider-input');
                 if (currentInput) currentInput.value = selectedVoice;
                 syncVolcPoolSelection();
+                preview.stop();
+                refreshPreviewButtons();
             }
         });
 
@@ -1065,6 +1106,8 @@ export class ContactsView {
         volcPoolSelect?.addEventListener('change', (e) => {
             const selectedVoice = String(e.target.value || '').trim();
             if (selectedVoice && volcVoiceInput) volcVoiceInput.value = selectedVoice;
+            preview.stop();
+            refreshPreviewButtons();
         });
         const syncVolcPoolSelection = () => {
             if (!volcPoolSelect) return;
@@ -1261,6 +1304,7 @@ export class ContactsView {
         });
 
         query('#save-edit-contact-btn')?.addEventListener('click', async () => {
+            preview.stop();
             const name = query('#edit-contact-name-input').value.trim();
             const remark = String(query('#edit-contact-remark-input')?.value || '').trim();
 

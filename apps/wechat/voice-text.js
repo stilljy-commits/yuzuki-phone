@@ -2,9 +2,9 @@ const VOICE_TRANSCRIPT_PREFIX_REGEX = /^(?:语音条?\s*)?(?:转文字|转文本
 const WECHAT_TRANSLATION_REGEX = /(?:\[\s*翻译\s*[：:]\s*([^\]\r\n]*)\]|【\s*翻译\s*[：:]\s*([^】\r\n]*)】)/gi;
 const WECHAT_INNER_THOUGHT_REGEX = /\[\s*内心\s*\]\s*[（(]\s*([\s\S]*?)\s*[）)]/g;
 const WECHAT_TTS_STATUS_REGEX = /\[\s*转线下\s*\]/gi;
-const WECHAT_VOICE_EXPRESSION_REGEX = /[\[【（(]\s*(心情|情绪|语气|语调)\s*[:：]\s*([^\]】）)\r\n]{1,80})[\]】）)]/g;
+const WECHAT_VOICE_EXPRESSION_REGEX = /[\[【（(]\s*(心情|情绪|语气|语调)\s*[:：]\s*([^\]】）)\r\n]{1,400})[\]】）)]/g;
 
-export const WECHAT_VOICE_EXPRESSION_RULE = '【语音表现】每条语音条及语音/视频通话的台词前，用 [心情：平静][语气：自然] 格式简短标注人物当下的心情和说话语气，内容按当前人物与情境填写。语音条示例：[语音条]（[心情：开心][语气：轻快]好呀，待会见！）。通话示例：[语音] [心情：安心][语气：轻柔]我在听。标记只描述表现，不属于台词；普通文字消息不添加这些标记，不把动作或旁白混进台词。';
+export const WECHAT_VOICE_EXPRESSION_RULE = '【语音表现】每条语音条及语音/视频通话的台词前，用 [心情：情绪词][语气：完整的声音表现描述] 标注。心情用1至2个词；语气必须是一句具体描述，结合人物与场景说明声调起伏、语速节奏、音量、停顿或气息，可带细腻的情绪色彩，不要只写“自然、急促、轻快”这类单词，也不要机械堆满所有维度，通常20至60字。语音条示例：[语音条]（[心情：开心][语气：语调自信地扬起，音量稍微抬高，话尾带着藏不住的兴奋和胜负欲]下午五点在操场，我等你！）。通话示例：[语音] [心情：安心][语气：声音放轻，语速慢了下来，留出耐心的停顿，尾音温柔而安稳]我在听，你慢慢说。标记只描述声音表现，不属于台词，不能把描述读出来；普通文字消息不添加这些标记，不把动作或旁白混进台词。';
 
 export function parseWechatVoiceExpression(value = '') {
     let mood = '';
@@ -12,7 +12,7 @@ export function parseWechatVoiceExpression(value = '') {
     const visibleContent = normalizeRemovedSegmentSpacing(String(value || '').replace(
         WECHAT_VOICE_EXPRESSION_REGEX,
         (_match, label, description) => {
-            const content = String(description || '').trim().slice(0, 40);
+            const content = String(description || '').trim().slice(0, label === '心情' || label === '情绪' ? 24 : 240);
             if (label === '心情' || label === '情绪') mood = content;
             else tone = content;
             return '';

@@ -23,6 +23,17 @@ test('voice expression parser accepts explicit fullwidth labels without inventin
     assert.deepEqual(parseWechatVoiceExpression('你好，今天怎么样？'), { visibleContent: '你好，今天怎么样？', mood: '', tone: '' });
 });
 
+test('detailed voice delivery is preserved in the card and excluded from spoken audio', () => {
+    const tone = '语调自信地扬起，音量稍微抬高，话尾带着藏不住的兴奋和胜负欲，说到约定时又特意放慢，带着一丝期待';
+    const parsed = parseWechatVoiceContent(`（[心情：开心][语气：${tone}]下午五点在操场，我等你！）`);
+    assert.equal(parsed.tone, tone);
+    assert.equal(parsed.ttsText, '下午五点在操场，我等你！');
+    const view = Object.create(ChatView.prototype); view._escapeHtml = escape;
+    const html = view._renderVoiceExpression(parsed);
+    assert.ok(html.includes(tone));
+    assert.match(html, /wechat-voice-mood/); assert.match(html, /wechat-voice-delivery/);
+});
+
 test('call bubbles render escaped mood and tone tags and keep speech intact', () => {
     const view = Object.create(ChatView.prototype);
     view._escapeHtml = escape; view.escapeInlineStickerAttr = escape;

@@ -30,7 +30,7 @@ import {
     parseWechatVoiceContent,
     stripWechatTranslationContent,
     stripWechatTtsNonSpeechContent
-} from './voice-text.js?v=20261018-integration';
+} from './voice-text.js?v=20261019-voice-preview';
 import { detectImageMime, normalizeImageDataUrlMime, resolveImageMime } from '../../config/image-mime.js';
 import {
     getPhoneInlineEmoji,
@@ -3676,7 +3676,8 @@ renderChatRoom(chat) {
                 }
 
                 // 🔥 包裹容器：竖向排列语音条和转文字
-                messageBody += `<div style="display: flex; flex-direction: column; gap: 4px; align-items: ${isMe ? 'flex-end' : 'flex-start'};">`;
+                const hasVoiceExpression = !!(parsedVoice.mood || msg.voiceMood || parsedVoice.tone || msg.voiceTone);
+                messageBody += `<div class="${hasVoiceExpression ? 'wechat-voice-card' : ''}" style="--wechat-voice-card-bg:${isMe ? '#95ec69' : '#fff'}; display: flex; flex-direction: column; gap: 4px; align-items: ${isMe ? 'flex-end' : 'flex-start'};">`;
 
                 // 🔥 1. 语音条：【完全复用 .message-text 类】，保证 padding、颜色、圆角、小尾巴和纯文字框 100% 像素级一致！
                 // 使用 display: flex 实现左右对齐
@@ -3693,7 +3694,7 @@ renderChatRoom(chat) {
                 messageBody += this._renderVoiceExpression({ mood: parsedVoice.mood || msg.voiceMood, tone: parsedVoice.tone || msg.voiceTone });
                 if (voiceText) {
                     messageBody += `
-                    <div class="${[voiceDisplay.hasTranslation ? 'wechat-translation-card' : '', showInnerThought ? 'wechat-inner-os-bubble' : ''].filter(Boolean).join(' ')}" style="
+                    <div class="${['wechat-voice-transcript', voiceDisplay.hasTranslation ? 'wechat-translation-card' : '', showInnerThought ? 'wechat-inner-os-bubble' : ''].filter(Boolean).join(' ')}" style="
                         position: relative;
                         padding: 7px 10px;
                         border-radius: 4px;
@@ -4315,9 +4316,10 @@ renderChatRoom(chat) {
     }
 
     _renderVoiceExpression({ mood = '', tone = '' } = {}) {
-        const tags = [[mood, '心情'], [tone, '语气']].filter(([value]) => String(value || '').trim());
-        if (!tags.length) return '';
-        return `<div class="wechat-voice-expression" role="note">${tags.map(([value, label]) => `<span>${label}：${this._escapeHtml(String(value).trim().slice(0, 40))}</span>`).join('')}</div>`;
+        const safeMood = this._escapeHtml(String(mood || '').trim().slice(0, 24));
+        const safeTone = this._escapeHtml(String(tone || '').trim().slice(0, 240));
+        if (!safeMood && !safeTone) return '';
+        return `<div class="wechat-voice-expression" role="note">${safeMood ? `<span class="wechat-voice-mood" aria-label="心情：${safeMood}">${safeMood}</span>` : ''}${safeTone ? `<div class="wechat-voice-delivery" aria-label="语气：${safeTone}">${safeTone}</div>` : ''}</div>`;
     }
 
     _renderWechatTranslationContent(originalText = '', translationText = '', {

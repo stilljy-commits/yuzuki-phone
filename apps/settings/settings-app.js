@@ -12,6 +12,7 @@
 // 设置APP
 import { ImageUploadManager } from './image-upload.js?v=20261006-story-upload-console-cleanup';
 import { ImageCropper } from './image-cropper.js';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-preview';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
 import { DEFAULT_APP_ICONS, PHONE_CONFIG } from '../../config/apps.js';
@@ -10471,69 +10472,21 @@ export class SettingsApp {
                 clearTimeout(timer);
             }
         };
-        const waitForAudioPlaybackStart = (audio) => new Promise((resolve, reject) => {
-            let settled = false;
-            const cleanup = () => {
-                audio.removeEventListener('playing', handlePlaying);
-                audio.removeEventListener('canplay', handleCanPlay);
-                audio.removeEventListener('error', handleError);
-            };
-            const settle = (fn, value) => {
-                if (settled) return;
-                settled = true;
-                cleanup();
-                fn(value);
-            };
-            const handlePlaying = () => settle(resolve);
-            const handleCanPlay = () => settle(resolve);
-            const handleError = () => settle(reject, new Error('音频解码或播放失败'));
-            audio.addEventListener('playing', handlePlaying, { once: true });
-            audio.addEventListener('canplay', handleCanPlay, { once: true });
-            audio.addEventListener('error', handleError, { once: true });
-            const playPromise = audio.play();
-            if (playPromise?.then) {
-                playPromise.then(() => settle(resolve)).catch(error => settle(reject, error));
-            }
+        this._ttsPreview?.stop();
+        const ttsPreviewRoot = document.querySelector('.phone-view-current');
+        const voicePreview = new TtsVoicePreview({
+            isActive: () => isVoicePreviewViewActive(ttsPreviewRoot),
+            watchActive: onChange => watchVoicePreviewView(ttsPreviewRoot, onChange),
+            onError: error => this.phoneShell.showNotification('试听失败', error.message, '⚠️')
         });
-        let ttsPreviewAudio = null;
-        const playTtsPreview = async (provider, voice, button) => {
-            const ttsManager = window.VirtualPhone?.ttsManager;
-            if (!ttsManager?.requestTTS) {
-                this.phoneShell.showNotification('试听失败', 'TTS 管理器未初始化', '⚠️');
-                return;
-            }
-            await withBusyButton(button, '试听中...', async () => {
-                let blobUrl = '';
-                try {
-                    const previewText = '这是一段小手机语音试听。';
-                    const currentModel = String(ttsModel?.value || '').trim();
-                    const isNimoVoiceClone = provider === 'nimo' && currentModel === 'mimo-v2.5-tts-voiceclone';
-                    const requestTimeoutMs = isNimoVoiceClone ? 120000 : 30000;
-                    const playbackTimeoutMs = isNimoVoiceClone ? 20000 : 10000;
-                    blobUrl = await withTimeoutSignal(requestTimeoutMs, (signal) => ttsManager.requestTTS(previewText, { provider, voice, signal }));
-                    if (ttsPreviewAudio) {
-                        ttsPreviewAudio.pause();
-                        if (ttsPreviewAudio.src?.startsWith('blob:')) URL.revokeObjectURL(ttsPreviewAudio.src);
-                        ttsPreviewAudio.src = '';
-                    }
-                    ttsPreviewAudio = new Audio(blobUrl);
-                    ttsPreviewAudio.onended = () => {
-                        URL.revokeObjectURL(blobUrl);
-                        blobUrl = '';
-                    };
-                    ttsPreviewAudio.onerror = () => {
-                        if (blobUrl) URL.revokeObjectURL(blobUrl);
-                        blobUrl = '';
-                    };
-                    await Promise.race([
-                        waitForAudioPlaybackStart(ttsPreviewAudio),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('试听播放超时')), playbackTimeoutMs))
-                    ]);
-                } catch (error) {
-                    if (blobUrl) URL.revokeObjectURL(blobUrl);
-                    this.phoneShell.showNotification('试听失败', error?.message || '无法播放试听音频', '⚠️');
-                }
-            });
+        this._ttsPreview = voicePreview;
+        ttsPreviewRoot?.querySelectorAll('input[id^="phone-tts"], select[id^="phone-tts"]').forEach(input => {
+            input.addEventListener('input', () => voicePreview.stop());
+            input.addEventListener('change', () => voicePreview.stop());
+        });
+        const playTtsPreview = (provider, voice, button) => {
+            const isNimoVoiceClone = provider === 'nimo' && String(ttsModel?.value || '').trim() === 'mimo-v2.5-tts-voiceclone';
+            return voicePreview.play({ provider, voice, requestTimeoutMs: isNimoVoiceClone ? 120000 : 30000, playbackTimeoutMs: isNimoVoiceClone ? 20000 : 10000 }, button);
         };
         const saveTtsGenderFallback = async (gender, providerEl, voiceEl) => {
             const safeGender = String(gender || '').trim() === 'male' ? 'male' : 'female';
@@ -11115,6 +11068,7 @@ export class SettingsApp {
                         <div style="color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtml(v.label || v.id)}</div>
                         <div style="color: #bbb; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace;">${this._escapeHtml(v.id)}</div>
                     </div>
+                    <button type="button" data-pool-preview="${i}" aria-label="试听 ${this._escapeHtml(v.label || v.id)}" aria-pressed="false" style="flex-shrink:0;padding:3px 8px;border:1px solid #d8e3ef;border-radius:5px;background:#f2f7ff;color:#576b95;font-size:11px;cursor:pointer;">试听</button>
                     <span data-pool-gender="${i}" style="flex-shrink: 0; padding: 2px 8px; border-radius: 6px; background: ${v.gender === 'f' ? '#ffe3ec' : (v.gender === 'm' ? '#e3edff' : '#efefef')}; color: #666; font-size: 11px; cursor: pointer;">${volcGenderLabel(v.gender)}</span>
                     <span data-pool-del="${i}" style="flex-shrink: 0; color: #ff3b30; font-size: 11px; cursor: pointer;">删除</span>
                 </div>
@@ -11209,6 +11163,12 @@ export class SettingsApp {
         const volcPoolListEl = document.getElementById('phone-tts-volc-pool-list');
         if (volcPoolListEl) {
             volcPoolListEl.addEventListener('click', async (e) => {
+                const previewEl = e.target.closest('[data-pool-preview]');
+                if (previewEl) {
+                    const voice = String(readVolcPool()[Number(previewEl.dataset.poolPreview)]?.id || '').trim();
+                    if (voice) await playTtsPreview('volcengine', voice, previewEl);
+                    return;
+                }
                 const genderEl = e.target.closest('[data-pool-gender]');
                 if (genderEl) {
                     const pool = readVolcPool();
