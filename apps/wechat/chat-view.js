@@ -4319,7 +4319,7 @@ renderChatRoom(chat) {
         const safeMood = this._escapeHtml(String(mood || '').trim().slice(0, 24));
         const safeTone = this._escapeHtml(String(tone || '').trim().slice(0, 240));
         if (!safeMood && !safeTone) return '';
-        return `<div class="wechat-voice-expression" role="note">${safeMood ? `<span class="wechat-voice-mood" aria-label="心情：${safeMood}">${safeMood}</span>` : ''}${safeTone ? `<div class="wechat-voice-delivery" aria-label="语气：${safeTone}">${safeTone}</div>` : ''}</div>`;
+        return `<div class="wechat-voice-expression" role="note">${safeMood ? `<span class="wechat-voice-mood" aria-label="心情：${safeMood.replace(/"/g, '&quot;')}">${safeMood}</span>` : ''}${safeTone ? `<div class="wechat-voice-delivery" aria-label="语气：${safeTone.replace(/"/g, '&quot;')}">${safeTone}</div>` : ''}</div>`;
     }
 
     _renderWechatTranslationContent(originalText = '', translationText = '', {

@@ -34,6 +34,14 @@ test('detailed voice delivery is preserved in the card and excluded from spoken 
     assert.match(html, /wechat-voice-mood/); assert.match(html, /wechat-voice-delivery/);
 });
 
+test('voice delivery quotes remain readable without breaking accessibility labels', () => {
+    const view = Object.create(ChatView.prototype);
+    view._escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = view._renderVoiceExpression({ mood: '“开心”', tone: '说到"我等你"时放慢，带着期待' });
+    assert.match(html, /aria-label="语气：说到&quot;我等你&quot;时放慢，带着期待"/);
+    assert.ok(html.includes('>说到"我等你"时放慢，带着期待</div>'));
+});
+
 test('call bubbles render escaped mood and tone tags and keep speech intact', () => {
     const view = Object.create(ChatView.prototype);
     view._escapeHtml = escape; view.escapeInlineStickerAttr = escape;
