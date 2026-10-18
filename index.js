@@ -28,7 +28,7 @@ import {
     parseOfflineWechatPayments,
     renderOfflineWechatPaymentReceipt
 } from './apps/wechat/offline-payment.js?v=1.6.1&r=20261011-payment-boundaries-and-flexible-years';
-import { parseWechatVoiceContent } from './apps/wechat/voice-text.js?v=20261019-voice-preview';
+import { parseWechatVoiceContent } from './apps/wechat/voice-text.js?v=20261019-voice-picker';
 import { StoryImageAutoScheduler } from './apps/album/story-image-auto-scheduler.js';
 import {
     combineMofoBeautifyTemplate,
@@ -38,11 +38,11 @@ import {
 } from './apps/mofo/mofo-renderer.js';
 
 const ST_PHONE_BASE_URL = new URL('./', import.meta.url).href;
-const ST_PHONE_VERSION = '1.6.3-p3';
-const ST_PHONE_CSS_REVISION = '20261019-voice-preview';
+const ST_PHONE_VERSION = '1.6.3-p4';
+const ST_PHONE_CSS_REVISION = '20261019-voice-picker';
 const ST_PHONE_APP_SWIPE_REVISION = '20261002-wechat-chat-return';
 const ST_PHONE_ALBUM_MODULE_REVISION = '20261006-story-image-outside-close';
-const ST_PHONE_WECHAT_MODULE_REVISION = '20261019-voice-preview';
+const ST_PHONE_WECHAT_MODULE_REVISION = '20261019-voice-picker';
 const ST_PHONE_WEIBO_MODULE_REVISION = '20261002-first-return-guard';
 const ST_PHONE_X_MODULE_REVISION = '20261010-publish-guard';
 const ST_PHONE_HONEY_ASSET_REVISION = '20261003-theme-media-recovery';
@@ -149,10 +149,8 @@ const ST_PHONE_CURRENT_UPDATE = {
     version: ST_PHONE_VERSION,
     date: '2026-10-19',
     items: [
-        "【新增】联系人音色选择支持试听，选择后可直接试听再保存绑定。",
-        "【新增】导入音色池每条音色都可试听。",
-        "【完善】语音卡片展示心情、完整声音表现描述和台词，保留详细语气且不把描述当台词朗读。",
-        "【完善】试听支持取消与停止；切换音色或离开页面会终止上一段试听。"
+        "【优化】联系人音色池列表支持逐条直接试听，满意后点“使用”，保存后再绑定。",
+        "【优化】所有音色统一使用约50字的短试听文本，包含陈述、开心、生气三种内容，无需切换文案。"
 ]
 };
 

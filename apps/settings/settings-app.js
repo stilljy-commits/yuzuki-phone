@@ -12,7 +12,7 @@
 // 设置APP
 import { ImageUploadManager } from './image-upload.js?v=20261006-story-upload-console-cleanup';
 import { ImageCropper } from './image-cropper.js';
-import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-preview';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-picker';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
 import { DEFAULT_APP_ICONS, PHONE_CONFIG } from '../../config/apps.js';

@@ -9620,6 +9620,23 @@ input:checked + .toggle-slider:before {
 .wechat-app .wechat-voice-card .wechat-voice-expression { padding:8px 12px 0; margin:0; }
 .wechat-app .wechat-voice-card .wechat-voice-transcript { padding:6px 12px 12px !important; background:transparent !important; box-shadow:none !important; border-radius:0 !important; line-height:1.65 !important; }
 .wechat-app .edit-contact-tts-preview:disabled { opacity:.45; cursor:default !important; }
+.wechat-app .wechat-voice-picker { margin-top:8px; border:1px solid #dfe5ed; border-radius:9px; overflow:hidden; background:#fff; }
+.wechat-app .wechat-voice-picker summary { display:flex; justify-content:space-between; gap:8px; padding:10px; font-size:12px; color:#576b95; cursor:pointer; list-style:none; }
+.wechat-app .wechat-voice-picker summary::-webkit-details-marker { display:none; }
+.wechat-app .wechat-voice-picker summary span:last-child { flex-shrink:0; color:#999; font-size:10px; }
+.wechat-app .wechat-voice-picker-body { padding:0 8px 8px; }
+.wechat-app .wechat-voice-picker-body > input { width:100%; box-sizing:border-box; padding:8px; border:1px solid #e2e6ed; border-radius:6px; background:#f7f9fc; font-size:12px; }
+.wechat-app .wechat-voice-picker-list { max-height:250px; overflow:auto; margin-top:5px; overscroll-behavior:contain; }
+.wechat-app .wechat-voice-picker-row { display:flex; align-items:center; gap:5px; padding:10px 3px; border-bottom:1px solid #eef0f3; }
+.wechat-app .wechat-voice-picker-row[hidden] { display:none !important; }
+.wechat-app .wechat-voice-picker-row.is-selected { background:#f0faf4; }
+.wechat-app .wechat-voice-picker-info { flex:1; min-width:0; }
+.wechat-app .wechat-voice-picker-name { color:#30343b; font-size:12px; overflow-wrap:anywhere; }
+.wechat-app .wechat-voice-picker-id { color:#999; font-size:10px; overflow-wrap:anywhere; margin-top:3px; }
+.wechat-app .wechat-voice-picker-row button { flex-shrink:0; min-width:42px; padding:6px 7px; border:1px solid #dce4ef; border-radius:6px; background:#f3f7ff; color:#576b95; font-size:11px; cursor:pointer; }
+.wechat-app .wechat-voice-picker-row button[data-voice-use] { border-color:#ccebd9; background:#effaf3; color:#198b55; }
+.wechat-app .wechat-voice-picker-row button[aria-pressed="true"] { border-color:#07c160; }
+.wechat-app .wechat-voice-picker-empty { padding:10px; font-size:11px; color:#999; }
 .wechat-app .wechat-profile-field { margin:0 0 13px; }
 .wechat-app .wechat-profile-field-label { margin-bottom:3px; color:#8b8d94; font-size:11px; }
 .wechat-app .wechat-profile-field-value { color:#30323a; font-size:14px; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }

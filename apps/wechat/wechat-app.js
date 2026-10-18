@@ -11,7 +11,7 @@
  * ======================================================== */
 // 微信APP主程序
 import { ChatView } from './chat-view.js?v=20261019-voice-preview';
-import { ContactsView } from './contacts-view.js?v=20261019-voice-preview';
+import { ContactsView } from './contacts-view.js?v=20261019-voice-picker';
 import { MomentsView } from './moments-view.js?v=20261004-moments-image-cancel';
 import { WechatData } from './wechat-data.js?v=20261019-voice-preview';
 import { getWalletAssetTotals, parseWalletAssetEvaluation } from './wallet-assets.js?v=20261011-wallet-credit-repayment';

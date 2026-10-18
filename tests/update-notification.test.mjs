@@ -9,14 +9,15 @@ const indexSource = fs.readFileSync(new URL('../index.js', import.meta.url), 'ut
 test('current integrated version publishes its features and preserves upstream release notes', () => {
     const current = updateLog.versions[manifest.version];
 
-    assert.equal(manifest.version, '1.6.3-p3');
-    assert.match(indexSource, /const ST_PHONE_VERSION = '1\.6\.3-p3';/);
+    assert.equal(manifest.version, '1.6.3-p4');
+    assert.match(indexSource, /const ST_PHONE_VERSION = '1\.6\.3-p4';/);
     assert.equal(manifest.auto_update, false);
     assert.equal(manifest.generate_interceptor, 'yuzukiPhoneGenerateInterceptor');
     assert.ok(updateLog.versions['1.6.3']);
     assert.ok(updateLog.versions['1.6.3-p2']);
+    assert.ok(updateLog.versions['1.6.3-p3']);
     assert.equal(current.date, '2026-10-19');
-    assert.equal(current.items.length, 4);
+    assert.equal(current.items.length, 2);
     assert.ok(current.items.some(item => item.includes('音色池')));
     assert.ok(current.items.some(item => item.includes('试听')));
     assert.equal(current.updates, undefined);

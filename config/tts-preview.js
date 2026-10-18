@@ -1,4 +1,4 @@
-export const TTS_PREVIEW_TEXT = '你好，很高兴认识你。这是我的声音，你觉得怎么样？';
+export const TTS_PREVIEW_TEXT = '下午三点，我们在图书馆见。太好了！我就知道你一定能成功！你怎么又失约了？我真的生气了，请认真回答。';
 
 export function isVoicePreviewViewActive(root) {
     return !!root?.isConnected && root.classList.contains('phone-view-current')

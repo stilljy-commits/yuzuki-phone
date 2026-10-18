@@ -16,7 +16,7 @@ import { ImageCropper } from '../settings/image-cropper.js?v=20261018-integratio
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
 import { ContactProfileView } from './contact-profile.js?v=20261018-integration';
-import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-preview';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-picker';
 
 export class ContactsView {
     constructor(wechatApp) {
@@ -157,28 +157,103 @@ export class ContactsView {
         return (contact?.ttsVoices && typeof contact.ttsVoices === 'object') ? contact.ttsVoices : {};
     }
 
-    _getVolcVoicePoolOptions(selectedVoice = '') {
+    _getVolcVoicePool() {
         try {
             const raw = this.app.storage.get('phone-tts-volc-voice-pool') || '[]';
             const pool = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            if (!Array.isArray(pool)) return '';
-
-            const selected = String(selectedVoice || '').trim();
+            if (!Array.isArray(pool)) return [];
             const seen = new Set();
-            return pool.map(item => {
-                if (!item || typeof item !== 'object') return '';
+            return pool.flatMap(item => {
+                if (!item || typeof item !== 'object') return [];
                 const id = String(item.id || '').trim();
-                if (!id || seen.has(id)) return '';
+                if (!id || seen.has(id)) return [];
                 seen.add(id);
-                const label = String(item.label || '').trim();
-                const gender = item.gender === 'f' ? '女' : (item.gender === 'm' ? '男' : '中性');
-                const text = label ? `${label} · ${gender}（${id}）` : `${id} · ${gender}`;
-                return `<option value="${this._escapeAttr(id)}"${id === selected ? ' selected' : ''}>${this._escapeHtml(text)}</option>`;
-            }).join('');
+                return [{ id, label: String(item.label || '').trim(), gender: item.gender === 'f' ? '女' : (item.gender === 'm' ? '男' : '中性') }];
+            });
         } catch (e) {
             console.warn('读取豆包音色池失败:', e);
-            return '';
+            return [];
         }
+    }
+
+    _getVolcVoicePoolOptions(selectedVoice = '') {
+        const selected = String(selectedVoice || '').trim();
+        return this._getVolcVoicePool().map(item => {
+            const label = item.label ? `${item.label} · ${item.gender}（${item.id}）` : `${item.id} · ${item.gender}`;
+            return `<option value="${this._escapeAttr(item.id)}"${item.id === selected ? ' selected' : ''}>${this._escapeHtml(label)}</option>`;
+        }).join('');
+    }
+
+    _renderVolcVoicePicker(pool) {
+        if (!pool.length) return '<div class="wechat-voice-picker-empty">音色池为空，请先在手机设置中导入。</div>';
+        return `<details class="wechat-voice-picker" id="edit-contact-volc-picker">
+            <summary><span id="edit-contact-volc-picker-summary">浏览导入音色池</span><span>${pool.length} 款音色</span></summary>
+            <div class="wechat-voice-picker-body">
+                <div class="wechat-voice-picker-empty">同一段约50字的文本：陈述、开心、生气。点击试听会产生合成用量。</div>
+                <input type="search" id="edit-contact-volc-pool-search" aria-label="搜索导入音色" placeholder="搜索名称或音色 ID">
+                <div class="wechat-voice-picker-list" role="region" aria-label="导入音色选择列表">
+                    ${pool.map((item, index) => `<div class="wechat-voice-picker-row" data-voice-index="${index}">
+                        <div class="wechat-voice-picker-info"><div class="wechat-voice-picker-name">${this._escapeHtml(item.label || item.id)}</div><div class="wechat-voice-picker-id">${this._escapeHtml(item.gender)} · ${this._escapeHtml(item.id)}</div></div>
+                        <button type="button" data-voice-preview="${index}" aria-label="试听 ${this._escapeAttr(item.label || item.id)}" aria-pressed="false">试听</button>
+                        <button type="button" data-voice-use="${index}" aria-label="使用 ${this._escapeAttr(item.label || item.id)}" aria-pressed="false">使用</button>
+                    </div>`).join('')}
+                </div>
+                <div id="edit-contact-volc-pool-empty" class="wechat-voice-picker-empty" hidden>没有匹配的音色</div>
+            </div>
+        </details>`;
+    }
+
+    _bindVolcVoicePicker(root, { pool, preview, onSelect }) {
+        const input = root.querySelector('.edit-contact-tts-provider-input[data-provider="volcengine"]');
+        const provider = root.querySelector('#edit-contact-tts-provider-select');
+        const rows = Array.from(root.querySelectorAll('[data-voice-index]'));
+        const sync = () => {
+            const voice = String(input?.value || '').trim();
+            rows.forEach(row => {
+                const selected = pool[Number(row.dataset.voiceIndex)]?.id === voice;
+                row.classList.toggle('is-selected', selected);
+                const button = row.querySelector('[data-voice-use]');
+                button.textContent = selected ? '已选' : '使用';
+                button.setAttribute('aria-pressed', String(selected));
+            });
+            const summary = root.querySelector('#edit-contact-volc-picker-summary');
+            const selected = pool.find(item => item.id === voice);
+            if (summary) summary.textContent = selected ? `已选：${selected.label || selected.id}` : '浏览导入音色池';
+        };
+        root.querySelectorAll('[data-voice-preview]').forEach(button => {
+            button.onclick = () => {
+                const item = pool[Number(button.dataset.voicePreview)];
+                if (item) void preview.play({ provider: 'volcengine', voice: item.id, label: item.label || item.id,
+                    languageBoost: root.querySelector('#edit-contact-tts-language-select')?.value || 'auto', requestTimeoutMs: 30000 }, button);
+            };
+        });
+        root.querySelectorAll('[data-voice-use]').forEach(button => {
+            button.onclick = () => {
+                const item = pool[Number(button.dataset.voiceUse)];
+                if (!item || !input) return;
+                preview.stop();
+                input.value = item.id;
+                if (provider) provider.value = 'volcengine';
+                sync();
+                onSelect?.(item);
+            };
+        });
+        const search = root.querySelector('#edit-contact-volc-pool-search');
+        if (search) search.oninput = () => {
+            const keyword = search.value.trim().toLocaleLowerCase();
+            let count = 0;
+            rows.forEach(row => {
+                const item = pool[Number(row.dataset.voiceIndex)];
+                row.hidden = !`${item.label} ${item.id} ${item.gender}`.toLocaleLowerCase().includes(keyword);
+                if (!row.hidden) count++;
+            });
+            const empty = root.querySelector('#edit-contact-volc-pool-empty');
+            if (empty) empty.hidden = count > 0;
+        };
+        input?.addEventListener('input', sync);
+        input?.addEventListener('change', sync);
+        sync();
+        return sync;
     }
 
     _getTtsVoiceHistoryOptions() {
@@ -633,6 +708,7 @@ export class ContactsView {
         const contactAvatarGroup = String(this.app.wechatData?.getContactAvatarGroup?.(safeContactId) || '').trim();
         const wechatSupplementalSetting = String(contact.wechatSupplementalSetting || '').trim();
         const ttsHistoryOptions = this._getTtsVoiceHistoryOptions();
+        const volcVoicePool = this._getVolcVoicePool();
         const referenceImage = this._normalizeWechatReferenceImage(contact.naiReferenceImage || contact.referenceImage || '');
         const referenceEnabled = !!referenceImage && contact.naiReferenceEnabled !== false && contact.naiReferenceEnabled !== 'false';
         const rawReferenceStrength = Number(contact.naiReferenceStrength ?? 0.7);
@@ -889,7 +965,6 @@ export class ContactsView {
                                         const providerVoice = String(contactTtsVoices?.[option.id] || '').trim();
                                         const value = providerVoice || (option.id === currentTtsProvider ? legacyTtsVoice : '');
                                         const activeText = option.id === currentTtsProvider ? '当前' : '';
-                                        const poolOptions = option.id === 'volcengine' ? this._getVolcVoicePoolOptions(value) : '';
                                         return `
                                             <div style="display: block;">
                                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
@@ -909,20 +984,14 @@ export class ContactsView {
                                                 <button type="button" class="edit-contact-tts-preview" data-provider="${option.id}" aria-label="试听${option.label}音色" aria-pressed="false" ${value ? '' : 'disabled'} style="flex-shrink:0;padding:8px 10px;border:1px solid #d8e3ef;border-radius:6px;background:#f2f7ff;color:#576b95;font-size:12px;cursor:pointer;">试听</button>
                                                 </div>
                                                 ${option.id === 'volcengine' ? `
-                                                    <select id="edit-contact-volc-pool-select" aria-label="从豆包音色池选择" ${poolOptions ? '' : 'disabled'} style="
-                                                        width: 100%; min-width: 0; height: 34px; margin-top: 6px; padding: 0 8px;
-                                                        ${softFieldStyle} border-radius: 6px; font-size: 12px; box-sizing: border-box;
-                                                    ">
-                                                        <option value="">${poolOptions ? '-- 从导入音色池选择 --' : '音色池为空，请先在设置中导入'}</option>
-                                                        ${poolOptions}
-                                                    </select>
-                                                    <div style="font-size: 10px; color: #999; line-height: 1.4; margin-top: 4px;">用于豆包 / 火山引擎。选择后填入上方音色 ID，保存后优先于自动分配；清空上方音色 ID 可恢复自动分配。</div>
+                                                    ${this._renderVolcVoicePicker(volcVoicePool)}
+                                                    <div style="font-size: 10px; color: #999; line-height: 1.4; margin-top: 4px;">列表里可先试听；满意后点“使用”，再保存。清空音色 ID 可恢复自动分配。</div>
                                                 ` : ''}
                                             </div>
                                         `;
                                     }).join('')}
                                 </div>
-                                <div id="edit-contact-tts-preview-status" role="status" style="font-size:11px;color:#576b95;line-height:1.5;margin-top:8px;">选好音色后可先试听，满意后点保存。</div>
+                                <div id="edit-contact-tts-preview-status" role="status" style="font-size:11px;color:#576b95;line-height:1.5;margin-top:8px;">试听使用同一段包含陈述、开心和生气的短文本。</div>
                                 <div style="font-size: 10px; color: #ff3b30; margin-top: 5px;">群聊自动播放会按发送者的默认服务商和对应音色逐条合成；未指定服务商则跟随全局设置。</div>
                             </div>
                         </div>
@@ -1060,7 +1129,7 @@ export class ContactsView {
             isActive: () => isVoicePreviewViewActive(currentView) && ttsFold?.classList.contains('is-open'),
             watchActive: onChange => watchVoicePreviewView(currentView, onChange),
             onState: ({ state, options: selected, error }) => {
-                if (previewStatus) previewStatus.textContent = error || (state === 'loading' ? `正在生成${selected.label}试听…` : state === 'playing' ? `正在试听${selected.label}，可点“停止”结束。` : '选好音色后可先试听，满意后点保存。');
+                if (previewStatus) previewStatus.textContent = error || (state === 'loading' ? `正在生成${selected.label}试听…` : state === 'playing' ? `正在试听${selected.label}，可点“停止”结束。` : '试听不会选择音色；满意后点“使用”，再保存。');
             },
             onError: error => this.app.phoneShell.showNotification('试听失败', error.message, '⚠️')
         });
@@ -1101,21 +1170,13 @@ export class ContactsView {
             }
         });
 
-        const volcPoolSelect = query('#edit-contact-volc-pool-select');
-        const volcVoiceInput = query('.edit-contact-tts-provider-input[data-provider="volcengine"]');
-        volcPoolSelect?.addEventListener('change', (e) => {
-            const selectedVoice = String(e.target.value || '').trim();
-            if (selectedVoice && volcVoiceInput) volcVoiceInput.value = selectedVoice;
-            preview.stop();
-            refreshPreviewButtons();
+        const syncVolcPoolSelection = this._bindVolcVoicePicker(currentView, {
+            pool: volcVoicePool, preview,
+            onSelect: item => {
+                refreshPreviewButtons();
+                if (previewStatus) previewStatus.textContent = `已选“${item.label || item.id}”，点击页面底部“保存”后生效。`;
+            }
         });
-        const syncVolcPoolSelection = () => {
-            if (!volcPoolSelect) return;
-            volcPoolSelect.value = String(volcVoiceInput?.value || '').trim();
-            if (volcPoolSelect.selectedIndex < 0) volcPoolSelect.value = '';
-        };
-        volcVoiceInput?.addEventListener('input', syncVolcPoolSelection);
-        volcVoiceInput?.addEventListener('change', syncVolcPoolSelection);
 
         const getAlbumImagePicker = () => {
             if (!this._albumImagePicker) {
