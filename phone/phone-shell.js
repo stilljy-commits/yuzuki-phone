@@ -263,6 +263,8 @@ export class PhoneShell {
                 '.honey-settings-content', '.honey-prompt-editor', '#honey-prompt-editor',
                 '.honey-ai-error-body', '.honey-ai-error-response',
                 '#wallet-eval-modal', '.wallet-eval-modal-panel', '.wallet-eval-modal-body', '.wallet-eval-reasoning',
+                '.wechat-wallet-parse-error-overlay', '.wechat-wallet-parse-error-dialog', '.wechat-wallet-parse-error-body', '.wechat-wallet-parse-error-response',
+                '.wechat-wallet-repayment-overlay', '.wechat-wallet-repayment-dialog', '.wechat-wallet-repayment-body', '.wechat-wallet-repayment-sources',
                 '.weibo-app', '.weibo-tab-content', '.weibo-detail-posts', '.weibo-settings-content', '.weibo-detail-page-body',
                 '.weibo-profile-wrapper', '.weibo-recommend-container', '.weibo-pull-refresh-indicator',
                 '.weibo-forward-overlay', '.weibo-forward-dialog', '.weibo-forward-dialog-compose', '.weibo-forward-list',
@@ -270,6 +272,7 @@ export class PhoneShell {
                 '.xapp-root', '.xapp-feed-scroll', '.xapp-chat-page', '.xapp-chat-list', '.xapp-dm-messages', '.xapp-detail-scroll', '.xapp-comments', '.xapp-profile-scroll', '.xapp-profile-posts', '.xapp-profile-edit-dialog', '.xapp-settings-scroll', '.xapp-settings-prompt', '.xapp-compose-scroll', '.xapp-compose-text',
                 '.xapp-post-menu-overlay', '.xapp-post-menu-sheet',
                 '.xapp-forward-overlay', '.xapp-forward-dialog', '.xapp-forward-list',
+                '.xapp-ai-parse-error-overlay', '.xapp-ai-parse-error-dialog', '.xapp-ai-parse-error-body', '.xapp-ai-parse-error-response',
                 '#wechat-weibo-preview-modal', '#wechat-weibo-preview-modal > div',
                 '#wechat-x-preview-modal', '#wechat-x-preview-modal > div', '.wechat-x-preview-body',
                 '#wechat-poker-preview-modal', '#wechat-poker-preview-modal > div', '.wechat-poker-preview-body',
@@ -320,7 +323,7 @@ export class PhoneShell {
                 '.wangxiang-content-scroll',
                 '.yzp-calendar-main', '.yzp-calendar-settings-body', '.yzp-calendar-prompt-editor',
                 '.yzp-calendar-memo-list', '.yzp-calendar-add-sheet', '.yzp-calendar-month-sheet', '.yzp-calendar-detail-sheet', '.yzp-calendar-detail-body', '.yzp-calendar-memo-input', '.yzp-calendar-type-menu',
-                '#phone-inline-reply-menu-pop', '.inline-reply-tabbar', '.inline-reply-page',
+                '#phone-inline-reply-menu-pop', '.inline-reply-tabbar', '.inline-reply-page', '.mofo-page-scroll-body',
                 '#mofo-list-wrap', '#mofo-preview-wrap'
             ];
 

@@ -10,7 +10,7 @@
  * Copyright (c) yuzuki. All rights reserved.
  * ======================================================== */
 // 设置APP
-import { ImageUploadManager } from './image-upload.js?v=20261002-x-image-cleanup';
+import { ImageUploadManager } from './image-upload.js?v=20261006-story-upload-console-cleanup';
 import { ImageCropper } from './image-cropper.js';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
@@ -1020,11 +1020,51 @@ export class SettingsApp {
             minimax_cn: { url: 'https://api.minimaxi.com/v1/t2a_v2', model: 'speech-02-hd', voice: 'female-shaonv' },
             minimax_intl: { url: 'https://api.minimax.io/v1/t2a_v2', model: 'speech-2.8-hd', voice: 'Chinese (Mandarin)_Warm_Girl' },
             openai: { url: 'https://api.openai.com/v1/audio/speech', model: 'tts-1', voice: 'alloy' },
+            fish: { url: 'https://api.fish.audio/v1/tts', model: 's2.1-pro-free', voice: '' },
             indextts: { url: 'http://127.0.0.1:7880/v1/audio/speech', model: 'index-tts2', voice: 'default.wav' },
             nimo: { url: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts', voice: 'mimo_default' },
             volcengine: { url: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional', model: 'seed-tts-2.0', voice: 'BV700_streaming', resourceId: 'seed-tts-2.0' }
         };
         return defaults[provider] || defaults.minimax_cn;
+    }
+
+    _getTtsUrlPresetOptions(provider) {
+        const presets = {
+            minimax_cn: [
+                { value: 'https://api.minimaxi.com/v1/t2a_v2', label: 'MiniMax 国内版' }
+            ],
+            minimax_intl: [
+                { value: 'https://api.minimax.io/v1/t2a_v2', label: 'MiniMax 国际版' }
+            ],
+            openai: [
+                { value: 'https://api.openai.com/v1/audio/speech', label: 'OpenAI 官方' }
+            ],
+            fish: [
+                { value: 'https://api.fish.audio/v1/tts', label: 'Fish Audio 官方' }
+            ],
+            indextts: [
+                { value: 'http://127.0.0.1:7880/v1/audio/speech', label: 'IndexTTS OpenAI 兼容版' },
+                { value: 'http://127.0.0.1:9001/api/clone', label: 'IndexTTS 雨落原生 API' }
+            ],
+            nimo: [
+                { value: 'https://api.xiaomimimo.com/v1', label: 'MiMo 官方' },
+                { value: '__nimo_public__', label: 'MiMo 公益站 / New API' }
+            ],
+            volcengine: [
+                { value: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional', label: '火山引擎/豆包' }
+            ]
+        };
+        return presets[String(provider || '').trim()] || [];
+    }
+
+    _renderTtsUrlPresetOptions(provider) {
+        const presets = this._getTtsUrlPresetOptions(provider);
+        const placeholder = presets.length > 1
+            ? '<option value="">-- 快速选择 --</option>'
+            : '';
+        return placeholder + presets
+            .map(option => `<option value="${this._escapeHtml(option.value)}">${this._escapeHtml(option.label)}</option>`)
+            .join('');
     }
 
     _getTtsProviderConfigKey(provider, field) {
@@ -1046,16 +1086,17 @@ export class SettingsApp {
 
     _getCurrentMainTtsProvider() {
         const scoped = String(this.storage.get('phone-tts-main-provider') || '').trim();
-        if (['minimax_cn', 'minimax_intl', 'openai', 'indextts', 'nimo'].includes(scoped)) return scoped;
+        if (['minimax_cn', 'minimax_intl', 'openai', 'fish', 'indextts', 'nimo'].includes(scoped)) return scoped;
 
         const current = this._getCurrentTtsProvider();
-        if (['minimax_cn', 'minimax_intl', 'openai', 'indextts', 'nimo'].includes(current)) return current;
+        if (['minimax_cn', 'minimax_intl', 'openai', 'fish', 'indextts', 'nimo'].includes(current)) return current;
 
         const legacyUrl = String(this.storage.get('phone-tts-url') || '').trim().toLowerCase();
         if (legacyUrl.includes('minimaxi.com')) return 'minimax_cn';
         if (legacyUrl.includes('minimax.chat') || legacyUrl.includes('minimax.io')) return 'minimax_intl';
         if (legacyUrl.includes('127.0.0.1:7880') || legacyUrl.includes('localhost:7880') || legacyUrl.includes('index-tts') || /\/api\/clone(?:[?#]|$)/.test(legacyUrl)) return 'indextts';
         if (legacyUrl.includes('xiaomimimo.com') || /\/(?:v1\/)?chat\/completions\b/.test(legacyUrl)) return 'nimo';
+        if (legacyUrl.includes('api.fish.audio') || /fish\.audio\/v1\/tts\b/.test(legacyUrl)) return 'fish';
         if (legacyUrl.includes('api.openai.com') || /\/audio\/speech\b/.test(legacyUrl)) return 'openai';
         return 'minimax_cn';
     }
@@ -1136,6 +1177,7 @@ export class SettingsApp {
             { id: 'minimax_cn', label: 'MiniMax 国内' },
             { id: 'minimax_intl', label: 'MiniMax 国际' },
             { id: 'openai', label: 'OpenAI' },
+            { id: 'fish', label: 'Fish Audio' },
             { id: 'indextts', label: 'IndexTTS 本地' },
             { id: 'nimo', label: 'MiMo-V2.5-TTS' },
             { id: 'volcengine', label: '豆包 / 火山引擎' }
@@ -1148,12 +1190,17 @@ export class SettingsApp {
         const renderTtsProviderOptions = (selectedProvider = '') => ttsProviderOptions
             .map(option => `<option value="${option.id}" ${selectedProvider === option.id ? 'selected' : ''}>${option.label}</option>`)
             .join('');
-        const isGeneralInteractionOpen = this.storage.get('phone-settings-general-interaction-open') === true;
+        const currentTtsUrlPresets = this._getTtsUrlPresetOptions(currentTtsProvider);
         const readStoredBool = (key, fallback = false) => {
             const value = this.storage.get(key, undefined);
             if (value === undefined || value === null) return fallback;
             return value === true || value === 'true';
         };
+        const hasStoredValue = (key) => {
+            const value = this.storage.get(key, undefined);
+            return value !== undefined && value !== null;
+        };
+        const isGeneralInteractionOpen = readStoredBool('phone-settings-general-interaction-open');
         const wechatOnlineControlsHtml = isWechatOnlineOnlyMode ? `
                             <div class="setting-item setting-toggle" style="margin-top: 8px; margin-left: 12px; padding-left: 10px; border-left: 2px solid rgba(7,193,96,0.18);">
                                 <div>
@@ -1193,17 +1240,19 @@ export class SettingsApp {
                                 </button>
                             </div>
         ` : '';
-        const hasStoredValue = (key) => {
-            const value = this.storage.get(key, undefined);
-            return value !== undefined && value !== null;
-        };
         const isGeneralLimitsOpen = readStoredBool('phone-settings-general-limits-open');
         const isGeneralOnlineInjectionOpen = hasStoredValue('phone-settings-general-online-injection-open')
             ? readStoredBool('phone-settings-general-online-injection-open')
             : isGeneralLimitsOpen;
-        const isGeneralOfflineInjectionOpen = hasStoredValue('phone-settings-general-offline-injection-open')
+        const isGeneralOnlineModeOpen = hasStoredValue('phone-settings-general-online-mode-open')
+            ? readStoredBool('phone-settings-general-online-mode-open')
+            : isGeneralOnlineInjectionOpen;
+        const legacyGeneralOfflineInjectionOpen = hasStoredValue('phone-settings-general-offline-injection-open')
             ? readStoredBool('phone-settings-general-offline-injection-open')
             : isGeneralLimitsOpen;
+        const isGeneralOperationOpen = hasStoredValue('phone-settings-general-operation-open')
+            ? readStoredBool('phone-settings-general-operation-open')
+            : legacyGeneralOfflineInjectionOpen;
         const isGeneralPersonalizationOpen = this.storage.get('phone-settings-general-personalization-open') === true;
         const isGeneralTextColorOpen = this.storage.get('phone-settings-general-text-color-open') === true;
         const isGeneralTimeOpen = this.storage.get('phone-settings-general-time-open') === true;
@@ -1806,6 +1855,20 @@ export class SettingsApp {
                         background: #ffffff !important;
                         box-shadow: 0 8px 24px rgba(18, 24, 38, 0.06), 0 1px 2px rgba(18, 24, 38, 0.04) !important;
                         overflow: hidden !important;
+                    }
+                    #tab-general > .yzp-settings-interaction-help {
+                        margin: 10px 0 !important;
+                        padding: 12px 14px !important;
+                        border: 1px solid rgba(18, 24, 38, 0.08) !important;
+                        border-radius: 14px !important;
+                        background: #ffffff !important;
+                        box-shadow: 0 8px 24px rgba(18, 24, 38, 0.06), 0 1px 2px rgba(18, 24, 38, 0.04) !important;
+                        color: color-mix(in srgb, var(--settings-text-color) 72%, transparent) !important;
+                        font-size: 11px !important;
+                        line-height: 1.55 !important;
+                    }
+                    #tab-general > .yzp-settings-interaction-help strong {
+                        color: var(--settings-text-color) !important;
                     }
                     #tab-general > details[data-settings-fold-key] > summary {
                         min-height: 46px !important;
@@ -2443,13 +2506,22 @@ export class SettingsApp {
                             </button>
                         </div>
 
-                        <details data-settings-fold-key="phone-settings-general-interaction-open" ${isGeneralInteractionOpen ? 'open' : ''} style="margin: 12px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
+                        <div data-settings-interaction-help class="yzp-settings-interaction-help">
+                            <strong>使用说明：</strong><br>
+                            1. 开启“互通模式”或“线上模式”，二选一<br>
+                            2. 互通模式为正文与小手机线上内容互通<br>
+                            3. 线上模式为小手机内容不与正文互通；线上模式分为同步现实时间/同步剧情时间。<br>
+                            4. 线上注入设置不分“互通模式”或“线上模式”模式，仅为使用小手机上聊天时设置。
+                        </div>
+
+                        <details data-settings-section="operation" data-settings-fold-key="phone-settings-general-operation-open" ${isGeneralOperationOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
                             <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
-                                <span>📡 互动模式</span>
+                                <span>⚙️ 操作设置</span>
                                 ${SETTINGS_FOLD_ARROW_HTML}
                             </summary>
                             <div style="padding: 10px 10px 4px;">
 
+                            <div data-settings-interaction-mode-controls>
                             <div class="setting-item setting-toggle">
                                 <div>
                                     <div class="setting-label">互通模式</div>
@@ -2460,10 +2532,12 @@ export class SettingsApp {
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
+                            </div>
 
-                            <div class="setting-item setting-toggle" style="margin-top: 10px;">
+                            <div data-settings-online-mode-controls>
+                            <div class="setting-item setting-toggle">
                                 <div>
-                                    <div class="setting-label">线上模式</div>
+                                    <div class="setting-label">启用线上模式</div>
                                     <div class="setting-desc">启用手机内线上聊天；可选定时主动触发，开启后会关闭微信线下注入相关开关</div>
                                 </div>
                                 <label class="toggle-switch">
@@ -2473,6 +2547,7 @@ export class SettingsApp {
                             </div>
 
                             ${wechatOnlineControlsHtml}
+                            </div>
 
                             <div class="setting-item setting-toggle" style="margin-top: 10px;">
                                 <div>
@@ -2540,16 +2615,18 @@ export class SettingsApp {
                                 </div>
                             </fieldset>
 
-                            <div class="setting-info">
-                                <strong>使用说明：</strong><br>
-                                1. 开启"互通模式"或"线上模式"<br>
-                                2. 在对应APP设置中配置各功能提示词<br>
-                                3. 在手机APP中发送消息，AI会自动回复
-                            </div>
                             </div>
                         </details>
 
-                        <details data-settings-fold-key="phone-settings-general-online-injection-open" ${isGeneralOnlineInjectionOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
+                        <details data-settings-section="online-mode" data-settings-fold-key="phone-settings-general-online-mode-open" ${isGeneralOnlineModeOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
+                            <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
+                                <span>📱 线上模式设置</span>
+                                ${SETTINGS_FOLD_ARROW_HTML}
+                            </summary>
+                            <div data-settings-online-mode-content style="padding: 10px 10px 4px;"></div>
+                        </details>
+
+                        <details data-settings-section="online-injection" data-settings-fold-key="phone-settings-general-online-injection-open" ${isGeneralOnlineInjectionOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
                             <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
                                 <span>📨 线上注入设置</span>
                                 ${SETTINGS_FOLD_ARROW_HTML}
@@ -2595,12 +2672,12 @@ export class SettingsApp {
                             </div>
                         </details>
 
-                        <details data-settings-fold-key="phone-settings-general-offline-injection-open" ${isGeneralOfflineInjectionOpen ? 'open' : ''} style="margin: 8px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
+                        <details data-settings-section="interaction" data-settings-fold-key="phone-settings-general-interaction-open" ${isGeneralInteractionOpen ? 'open' : ''} style="margin: 12px 0 8px; border: 1px solid #ececec; border-radius: 10px; background: #fff; overflow: hidden;">
                             <summary style="height: 38px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; font-size: 13px; font-weight: 700; color: #333; background: #fafafa;">
-                                <span>📴 线下注入设置</span>
+                                <span>📡 互动模式</span>
                                 ${SETTINGS_FOLD_ARROW_HTML}
                             </summary>
-                            <div style="padding: 10px 10px 4px;">
+                            <div data-settings-interaction-content style="padding: 10px 10px 4px;">
 
                             <div class="settings-subsection-title">微信线下记录</div>
 
@@ -3069,7 +3146,7 @@ export class SettingsApp {
 
                                 <div class="phone-api-panel phone-api-route-panel">
                                     <div class="phone-api-panel-title"><i class="fa-solid fa-share-nodes" aria-hidden="true"></i><span>App API 路由</span></div>
-                                    <div class="phone-api-route-desc">支持蜜语/微信APP指定单独API。</div>
+                                    <div class="phone-api-route-desc">支持微信、蜜语、X 和正文生图 TAG 请求分别指定独立 API。</div>
                                     <div class="phone-api-route-row">
                                         <div class="phone-api-route-label">微信</div>
                                         <select id="phone-api-route-wechat" class="phone-api-control" data-api-route-app="wechat" style="border: 1px solid #e0e0e0; background: #fff; box-sizing: border-box;">
@@ -3079,6 +3156,18 @@ export class SettingsApp {
                                     <div class="phone-api-route-row">
                                         <div class="phone-api-route-label">蜜语</div>
                                         <select id="phone-api-route-honey" class="phone-api-control" data-api-route-app="honey" style="border: 1px solid #e0e0e0; background: #fff; box-sizing: border-box;">
+                                            <option value="">跟随当前预设</option>
+                                        </select>
+                                    </div>
+                                    <div class="phone-api-route-row">
+                                        <div class="phone-api-route-label">X</div>
+                                        <select id="phone-api-route-x" class="phone-api-control" data-api-route-app="x" style="border: 1px solid #e0e0e0; background: #fff; box-sizing: border-box;">
+                                            <option value="">跟随当前预设</option>
+                                        </select>
+                                    </div>
+                                    <div class="phone-api-route-row">
+                                        <div class="phone-api-route-label">正文生图（TAG）</div>
+                                        <select id="phone-api-route-story" class="phone-api-control" data-api-route-app="story" style="border: 1px solid #e0e0e0; background: #fff; box-sizing: border-box;">
                                             <option value="">跟随当前预设</option>
                                         </select>
                                     </div>
@@ -3165,16 +3254,8 @@ export class SettingsApp {
                                     <div class="setting-item">
                                         <div style="display: flex; align-items: center; justify-content: space-between;">
                                             <span style="font-size: 14px; color: #000;">API 接口地址</span>
-                                            <select id="phone-tts-url-preset" style="width: 140px; height: 30px; padding: 0 4px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 11px; background: #fafafa;">
-                                                <option value="">-- 快速选择 --</option>
-                                                <option value="https://api.minimaxi.com/v1/t2a_v2">MiniMax 国内版</option>
-                                                <option value="https://api.minimax.io/v1/t2a_v2">MiniMax 国际版</option>
-                                                <option value="https://api.openai.com/v1/audio/speech">OpenAI 官方</option>
-                                                <option value="http://127.0.0.1:7880/v1/audio/speech">IndexTTS OpenAI 兼容版</option>
-                                                <option value="http://127.0.0.1:9001/api/clone">IndexTTS 雨落原生 API</option>
-                                                <option value="https://api.xiaomimimo.com/v1">MiMo 官方</option>
-                                                <option value="__nimo_public__">MiMo 公益站 / New API</option>
-                                                <option value="https://openspeech.bytedance.com/api/v3/tts/unidirectional">火山引擎/豆包</option>
+                                            <select id="phone-tts-url-preset" ${currentTtsUrlPresets.length <= 1 ? 'disabled' : ''} style="width: 140px; height: 30px; padding: 0 4px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 11px; background: #fafafa;">
+                                                ${this._renderTtsUrlPresetOptions(currentTtsProvider)}
                                             </select>
                                         </div>
                                         <input type="text" id="phone-tts-url"
@@ -3188,7 +3269,7 @@ export class SettingsApp {
                                         <div class="phone-secret-field" style="width: 140px; height: 30px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fafafa;">
                                             <input type="text" class="phone-secret-input phone-secret-masked" id="phone-tts-key"
                                                    value="${currentTtsKey}"
-                                                   placeholder="${currentTtsProvider === 'indextts' ? 'IndexTTS 本地无需填写' : 'MiniMax/OpenAI/MiMo API Key'}"
+                                                   placeholder="${currentTtsProvider === 'indextts' ? 'IndexTTS 本地无需填写' : 'MiniMax/OpenAI/Fish/MiMo API Key'}"
                                                    style="width: 100%; min-width: 0; height: 100%; padding: 0 34px 0 8px; border: none; outline: none; font-size: 12px; background: transparent; box-sizing: border-box;">
                                             <button type="button" class="phone-password-toggle" data-toggle-password-target="phone-tts-key" aria-label="显示 TTS API Key" title="显示 TTS API Key">
                                                 <i class="fa-regular fa-eye"></i>
@@ -3211,7 +3292,7 @@ export class SettingsApp {
                                                value="${currentTtsModel}"
                                                placeholder="选择预设或手动输入模型名"
                                                style="width: 100%; height: 30px; padding: 0 8px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 12px; background: #fafafa; margin-top: 6px; box-sizing: border-box;">
-                                        <div id="phone-tts-models-result" class="setting-desc" style="margin-top: 6px; display: ${['nimo', 'indextts'].includes(currentTtsProvider) ? 'block' : 'none'} !important;">${currentTtsProvider === 'indextts' ? '旧兼容版可拉取 /v1/models；雨落版使用 /api/clone，无需 API Key。' : (currentTtsProvider === 'nimo' ? 'MiMo 公益站可从当前站点 /v1/models 拉取可用模型。' : '')}</div>
+                                        <div id="phone-tts-models-result" class="setting-desc" style="margin-top: 6px; display: ${['nimo', 'indextts', 'fish'].includes(currentTtsProvider) ? 'block' : 'none'} !important;">${currentTtsProvider === 'indextts' ? '旧兼容版可拉取 /v1/models；雨落版使用 /api/clone，无需 API Key。' : (currentTtsProvider === 'nimo' ? 'MiMo 公益站可从当前站点 /v1/models 拉取可用模型。' : (currentTtsProvider === 'fish' ? '免费模型必须使用 s2.1-pro-free；请求会通过酒馆 /proxy 转发。' : ''))}</div>
                                     </div>
 
                                     <div id="phone-tts-nimo-relay-setting" class="setting-item" style="display: ${currentTtsProvider === 'nimo' ? 'block' : 'none'} !important;">
@@ -3227,16 +3308,16 @@ export class SettingsApp {
 
                                     <div class="setting-item">
                                         <div style="display: flex; align-items: center; justify-content: space-between;">
-                                            <span id="phone-tts-voice-label" style="font-size: 14px; color: #000;">${currentTtsProvider === 'indextts' ? '参考音频 / 音色 ID' : '音色 ID (Voice)'}</span>
+                                            <span id="phone-tts-voice-label" style="font-size: 14px; color: #000;">${currentTtsProvider === 'indextts' ? '参考音频 / 音色 ID' : (currentTtsProvider === 'fish' ? 'Fish 音色 ID (reference_id)' : '音色 ID (Voice)')}</span>
                                             <select id="phone-tts-voice-preset" style="width: 140px; height: 30px; padding: 0 4px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 11px; background: #fafafa;">
                                                 <option value="">-- 历史音色 --</option>
                                             </select>
                                         </div>
                                         <input type="text" id="phone-tts-voice"
                                                value="${currentTtsVoice}"
-                                               placeholder="${currentTtsProvider === 'indextts' ? '雨落版例如 demo_boy.wav 或 F:/voices/角色.wav' : ''}"
+                                               placeholder="${currentTtsProvider === 'indextts' ? '雨落版例如 demo_boy.wav 或 F:/voices/角色.wav' : (currentTtsProvider === 'fish' ? '例如 9a9cf47702da476aa4629e2506d4a857' : '')}"
                                                style="width: 100%; height: 30px; padding: 0 8px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 12px; background: #fafafa; margin-top: 6px; box-sizing: border-box;">
-                                        <div id="phone-tts-voice-help" class="setting-desc" style="margin-top: 4px; display: ${currentTtsProvider === 'indextts' ? 'block' : 'none'} !important;">雨落版填写 resources/prompt_audio 内的文件名或参考音频绝对路径；旧兼容版填写 Voice。</div>
+                                        <div id="phone-tts-voice-help" class="setting-desc" style="margin-top: 4px; display: ${['indextts', 'fish'].includes(currentTtsProvider) ? 'block' : 'none'} !important;">${currentTtsProvider === 'fish' ? '填写 Fish 音色库或复刻模型的 ID；仅使用本人或已获授权的声音。' : '雨落版填写 resources/prompt_audio 内的文件名或参考音频绝对路径；旧兼容版填写 Voice。'}</div>
                                         <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px;">
                                             <button id="phone-tts-preview" style="padding: 2px 8px; border: none; background: none; color: #1677ff; font-size: 10px; cursor: pointer;">试听当前音色</button>
                                             <button id="phone-tts-voice-delete" style="padding: 2px 8px; border: none; background: none; color: #ff3b30; font-size: 10px; cursor: pointer;">删除当前音色</button>
@@ -3525,8 +3606,39 @@ export class SettingsApp {
         `;
 
         this.phoneShell.setContent(html);
+        this._arrangeGeneralSettingsSections();
         this._applySettingsThemeIsolation();
         this.bindEvents();
+    }
+
+    _arrangeGeneralSettingsSections() {
+        const generalTab = document.querySelector('#yzp-settings-app #tab-general');
+        if (!generalTab) return;
+
+        const interactionSection = generalTab.querySelector('details[data-settings-section="interaction"]');
+        const operationSection = generalTab.querySelector('details[data-settings-section="operation"]');
+        const onlineModeSection = generalTab.querySelector('details[data-settings-section="online-mode"]');
+        const onlineInjectionSection = generalTab.querySelector('details[data-settings-section="online-injection"]');
+        const interactionContent = interactionSection?.querySelector('[data-settings-interaction-content]');
+        const onlineModeContent = onlineModeSection?.querySelector('[data-settings-online-mode-content]');
+        const interactionModeControls = operationSection?.querySelector('[data-settings-interaction-mode-controls]');
+        const onlineModeControls = operationSection?.querySelector('[data-settings-online-mode-controls]');
+
+        if (interactionContent && interactionModeControls) {
+            interactionContent.prepend(interactionModeControls);
+        }
+        if (onlineModeContent && onlineModeControls) {
+            onlineModeContent.prepend(onlineModeControls);
+        }
+        if (!interactionSection || !operationSection) return;
+
+        generalTab.insertBefore(interactionSection, operationSection);
+        if (onlineModeSection && onlineInjectionSection) {
+            generalTab.insertBefore(onlineModeSection, onlineInjectionSection);
+        }
+        if (onlineInjectionSection) {
+            generalTab.insertBefore(operationSection, onlineInjectionSection.nextSibling);
+        }
     }
 
     _getImagePromptAppDefs() {
@@ -8213,9 +8325,15 @@ export class SettingsApp {
             host.appendChild(overlay);
             const textarea = overlay.querySelector('#phone-image-preset-share-text');
             const close = () => overlay.remove();
+            let overlayPointerStartedOnBackdrop = false;
             overlay.querySelector('#phone-image-preset-share-cancel')?.addEventListener('click', close);
+            overlay.addEventListener('pointerdown', (e) => {
+                overlayPointerStartedOnBackdrop = e.target === overlay;
+            });
             overlay.addEventListener('click', (e) => {
-                if (e.target === overlay) close();
+                const shouldCloseFromBackdrop = overlayPointerStartedOnBackdrop && e.target === overlay;
+                overlayPointerStartedOnBackdrop = false;
+                if (shouldCloseFromBackdrop) close();
             });
             overlay.querySelector('#phone-image-preset-share-confirm')?.addEventListener('click', async () => {
                 try {
@@ -8890,6 +9008,11 @@ export class SettingsApp {
                 imageOpenaiPresetName.focus();
             }
             await setOpenAIActivePresetId(appKey, '');
+            const emptyForm = { fixedPrompt: '', fixedPromptEnd: '', negativePrompt: '' };
+            if (imageFixedPromptInput) imageFixedPromptInput.value = '';
+            if (imageFixedPromptEndInput) imageFixedPromptEndInput.value = '';
+            if (imageNegativePromptInput) imageNegativePromptInput.value = '';
+            await saveOpenAIImagePromptDraft(appKey, emptyForm);
             this.phoneShell?.showNotification?.('新建 GPT 预设', '填写名称后点击保存', '✏️');
         });
 
@@ -9090,6 +9213,7 @@ export class SettingsApp {
                 imagePromptPresetName.focus();
             }
             await this.storage.set(`phone-image-${this._normalizeImagePresetScope(appKey)}-active-prompt-preset`, '');
+            await setImagePromptForm({});
             this.phoneShell?.showNotification?.('新建生图设定', '填写名称后点击保存', '✏️');
         });
 
@@ -10109,6 +10233,12 @@ export class SettingsApp {
                 { value: 'tts-1-hd', label: 'tts-1-hd' },
                 { value: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts' }
             ],
+            fish: [
+                { value: 's2.1-pro-free', label: 's2.1-pro-free（免费）' },
+                { value: 's2.1-pro', label: 's2.1-pro（付费）' },
+                { value: 's2-pro', label: 's2-pro（付费）' },
+                { value: 'drama-3-preview', label: 'drama-3-preview（预览）' }
+            ],
             indextts: [
                 { value: 'index-tts2', label: 'index-tts2' }
             ],
@@ -10145,6 +10275,7 @@ export class SettingsApp {
                 { value: 'Milo', label: 'Milo' },
                 { value: 'Dean', label: 'Dean' }
             ],
+            fish: [],
             minimax_cn: [],
             minimax_intl: []
         };
@@ -10155,6 +10286,7 @@ export class SettingsApp {
             if (url.includes('127.0.0.1:7880') || url.includes('localhost:7880') || url.includes('index-tts') || /\/api\/clone(?:[?#]|$)/.test(url)) return 'indextts';
             if (url.includes('xiaomimimo.com') || /\/(?:v1\/)?chat\/completions\b/.test(url)) return 'nimo';
             if (url.includes('openspeech.bytedance.com')) return 'volcengine';
+            if (url.includes('api.fish.audio') || /fish\.audio\/v1\/tts\b/.test(url)) return 'fish';
             if (url.includes('api.openai.com') || /\/audio\/speech\b/.test(url)) return 'openai';
             return String(fallback || '').trim() || 'minimax_cn';
         };
@@ -10178,17 +10310,30 @@ export class SettingsApp {
             setProviderFieldVisible(ttsMainProviderOptions, provider !== 'volcengine');
             setProviderFieldVisible(ttsNimoRelaySetting, provider === 'nimo');
             setProviderFieldVisible(ttsNimoCloneSetting, provider === 'nimo');
+            if (ttsUrlPreset) {
+                const urlPresets = this._getTtsUrlPresetOptions(provider);
+                ttsUrlPreset.innerHTML = this._renderTtsUrlPresetOptions(provider);
+                ttsUrlPreset.disabled = urlPresets.length <= 1;
+                ttsUrlPreset.value = urlPresets.length === 1 ? urlPresets[0].value : '';
+            }
             if (ttsMainKeyLabel) ttsMainKeyLabel.textContent = provider === 'indextts' ? 'API Key（可留空）' : 'API Key';
-            if (ttsKey) ttsKey.placeholder = provider === 'indextts' ? 'IndexTTS 本地无需填写' : 'MiniMax/OpenAI/MiMo API Key';
-            if (ttsVoiceLabel) ttsVoiceLabel.textContent = provider === 'indextts' ? '参考音频 / 音色 ID' : '音色 ID (Voice)';
-            if (ttsVoice) ttsVoice.placeholder = provider === 'indextts' ? '雨落版例如 demo_boy.wav 或 F:/voices/角色.wav' : '';
-            setProviderFieldVisible(ttsVoiceHelp, provider === 'indextts');
+            if (ttsKey) ttsKey.placeholder = provider === 'indextts' ? 'IndexTTS 本地无需填写' : 'MiniMax/OpenAI/Fish/MiMo API Key';
+            if (ttsVoiceLabel) ttsVoiceLabel.textContent = provider === 'indextts' ? '参考音频 / 音色 ID' : (provider === 'fish' ? 'Fish 音色 ID (reference_id)' : '音色 ID (Voice)');
+            if (ttsVoice) ttsVoice.placeholder = provider === 'indextts' ? '雨落版例如 demo_boy.wav 或 F:/voices/角色.wav' : (provider === 'fish' ? '例如 9a9cf47702da476aa4629e2506d4a857' : '');
+            setProviderFieldVisible(ttsVoiceHelp, provider === 'indextts' || provider === 'fish');
+            if (ttsVoiceHelp) {
+                ttsVoiceHelp.textContent = provider === 'fish'
+                    ? '填写 Fish 音色库或复刻模型的 ID；仅使用本人或已获授权的声音。'
+                    : '雨落版填写 resources/prompt_audio 内的文件名或参考音频绝对路径；旧兼容版填写 Voice。';
+            }
             if (ttsModelsResult) {
-                const supportsModelFetch = provider === 'nimo' || provider === 'indextts';
-                setProviderFieldVisible(ttsModelsResult, supportsModelFetch);
+                const showsModelHelp = provider === 'nimo' || provider === 'indextts' || provider === 'fish';
+                setProviderFieldVisible(ttsModelsResult, showsModelHelp);
                 ttsModelsResult.textContent = provider === 'indextts'
                     ? '旧兼容版可拉取 /v1/models；雨落版使用 /api/clone，无需 API Key。'
-                    : (provider === 'nimo' ? 'MiMo 公益站可从当前站点 /v1/models 拉取可用模型。' : '');
+                    : (provider === 'nimo'
+                        ? 'MiMo 公益站可从当前站点 /v1/models 拉取可用模型。'
+                        : (provider === 'fish' ? '免费模型必须使用 s2.1-pro-free；请求会通过酒馆 /proxy 转发。' : ''));
                 ttsModelsResult.style.color = '#666';
             }
             if (ttsModelPreset) {
@@ -10219,7 +10364,7 @@ export class SettingsApp {
             const provider = getCurrentMainProviderFromForm();
             const safeValue = String(value || '').trim();
             await this.storage.set(this._getTtsProviderConfigKey(provider, field), safeValue);
-            if (['minimax_cn', 'minimax_intl', 'openai', 'indextts', 'nimo'].includes(provider)) {
+            if (['minimax_cn', 'minimax_intl', 'openai', 'fish', 'indextts', 'nimo'].includes(provider)) {
                 await this.storage.set('phone-tts-main-provider', provider);
                 await this.storage.set('phone-tts-provider', provider);
             }
@@ -10414,7 +10559,7 @@ export class SettingsApp {
             if (ttsKey) { ttsKey.value = nextKey; await this.storage.set('phone-tts-key', nextKey); }
             if (ttsModel) { ttsModel.value = nextModel; await this.storage.set('phone-tts-model', nextModel); }
             if (ttsVoice) { ttsVoice.value = nextVoice; }
-            if (['minimax_cn', 'minimax_intl', 'openai', 'indextts', 'nimo'].includes(val)) {
+            if (['minimax_cn', 'minimax_intl', 'openai', 'fish', 'indextts', 'nimo'].includes(val)) {
                 await this.storage.set('phone-tts-main-provider', val);
             }
             refreshTtsPresetOptions();
@@ -11000,8 +11145,8 @@ export class SettingsApp {
                 try { resolved = wechatData.resolveTtsVoiceByName?.(c.name, { includeChats: false }) || null; } catch (e) { resolved = null; }
                 const voice = String(resolved?.voice || '').trim();
                 const isAuto = !!(resolved && resolved.autoAssigned);
-                const bound = String((c.ttsVoices && (c.ttsVoices.volcengine || Object.values(c.ttsVoices || {})[0])) || c.ttsVoice || '').trim();
-                const tag = bound ? '已绑定' : (voice ? (isAuto ? '自动分配' : '兜底') : '无音色');
+                const bound = !!voice && !isAuto && resolved?.provider === 'volcengine';
+                const tag = resolved?.provider && resolved.provider !== 'volcengine' ? '其他服务商' : (bound ? '已绑定' : (voice ? (isAuto ? '自动分配' : '兜底') : '无音色'));
                 const tagColor = bound ? '#1677ff' : (isAuto ? '#18a058' : '#999');
                 return `
                     <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f5f5f5; font-size: 12px;">
@@ -11224,7 +11369,7 @@ export class SettingsApp {
                 ? merged.appProfileRoutes
                 : {};
             merged.appProfileRoutes = {};
-            ['wechat', 'honey'].forEach((appId) => {
+            ['wechat', 'honey', 'x', 'story'].forEach((appId) => {
                 const routeName = String(rawRoutes[appId] || '').trim();
                 merged.appProfileRoutes[appId] = validProfileNames.has(routeName) ? routeName : '';
             });
@@ -11336,7 +11481,7 @@ export class SettingsApp {
             const routeOptions = ['<option value="">跟随当前预设</option>']
                 .concat(config.profiles.map(p => `<option value="${this._escapeHtml(p.name)}">${this._escapeHtml(p.name)}</option>`))
                 .join('');
-            ['wechat', 'honey'].forEach((appId) => {
+            ['wechat', 'honey', 'x', 'story'].forEach((appId) => {
                 const select = document.getElementById(`phone-api-route-${appId}`);
                 if (!select) return;
                 const value = String(config.appProfileRoutes?.[appId] || '').trim();
@@ -11824,8 +11969,9 @@ export class SettingsApp {
                                 : { 'Content-Type': 'application/json' };
 
                             if (provider === 'gemini') {
-                                if (apiUrl.includes('googleapis.com') && !apiUrl.toLowerCase().includes('/v1')) {
-                                    directUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+                                if (apiManager?._isOfficialGeminiApiUrl?.(apiUrl)) {
+                                    directUrl = apiManager._buildOfficialGeminiModelsUrl(apiUrl);
+                                    if (apiKey) headers['x-goog-api-key'] = apiKey;
                                 } else if (authHeader) {
                                     headers.Authorization = authHeader;
                                 }

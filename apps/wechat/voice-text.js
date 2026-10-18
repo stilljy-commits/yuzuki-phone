@@ -2,6 +2,24 @@ const VOICE_TRANSCRIPT_PREFIX_REGEX = /^(?:语音条?\s*)?(?:转文字|转文本
 const WECHAT_TRANSLATION_REGEX = /(?:\[\s*翻译\s*[：:]\s*([^\]\r\n]*)\]|【\s*翻译\s*[：:]\s*([^】\r\n]*)】)/gi;
 const WECHAT_INNER_THOUGHT_REGEX = /\[\s*内心\s*\]\s*[（(]\s*([\s\S]*?)\s*[）)]/g;
 const WECHAT_TTS_STATUS_REGEX = /\[\s*转线下\s*\]/gi;
+const WECHAT_VOICE_EXPRESSION_REGEX = /[\[【（(]\s*(心情|情绪|语气|语调)\s*[:：]\s*([^\]】）)\r\n]{1,80})[\]】）)]/g;
+
+export const WECHAT_VOICE_EXPRESSION_RULE = '【语音表现】每条语音条及语音/视频通话的台词前，用 [心情：平静][语气：自然] 格式简短标注人物当下的心情和说话语气，内容按当前人物与情境填写。语音条示例：[语音条]（[心情：开心][语气：轻快]好呀，待会见！）。通话示例：[语音] [心情：安心][语气：轻柔]我在听。标记只描述表现，不属于台词；普通文字消息不添加这些标记，不把动作或旁白混进台词。';
+
+export function parseWechatVoiceExpression(value = '') {
+    let mood = '';
+    let tone = '';
+    const visibleContent = normalizeRemovedSegmentSpacing(String(value || '').replace(
+        WECHAT_VOICE_EXPRESSION_REGEX,
+        (_match, label, description) => {
+            const content = String(description || '').trim().slice(0, 40);
+            if (label === '心情' || label === '情绪') mood = content;
+            else tone = content;
+            return '';
+        }
+    ));
+    return { visibleContent, mood, tone };
+}
 
 function normalizeRemovedSegmentSpacing(value = '') {
     return String(value || '')
@@ -56,7 +74,7 @@ export function parseWechatInnerThoughtContent(value = '') {
 export function stripWechatTtsNonSpeechContent(value = '') {
     const parsedInnerThought = parseWechatInnerThoughtContent(value);
     return normalizeRemovedSegmentSpacing(
-        stripWechatTranslationContent(parsedInnerThought.visibleContent)
+        stripWechatTranslationContent(parseWechatVoiceExpression(parsedInnerThought.visibleContent).visibleContent)
             .replace(WECHAT_TTS_STATUS_REGEX, '')
     );
 }
@@ -98,7 +116,8 @@ export function normalizeWechatVoiceText(value = '') {
 
 export function parseWechatVoiceContent(value = '') {
     const parsedInnerThought = parseWechatInnerThoughtContent(value);
-    const voiceSource = parsedInnerThought.visibleContent;
+    const expression = parseWechatVoiceExpression(parsedInnerThought.visibleContent);
+    const voiceSource = expression.visibleContent;
 
     const voiceText = normalizeWechatVoiceText(voiceSource);
     const translated = parseWechatTranslationContent(voiceText);
@@ -107,6 +126,8 @@ export function parseWechatVoiceContent(value = '') {
         voiceText: translated.displayText,
         ttsText: translated.speechText,
         translationText: translated.translationText,
-        innerThought: parsedInnerThought.innerThought
+        innerThought: parsedInnerThought.innerThought,
+        ...(expression.mood ? { mood: expression.mood } : {}),
+        ...(expression.tone ? { tone: expression.tone } : {})
     };
 }

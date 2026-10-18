@@ -4,6 +4,12 @@
  * ======================================================== */
 
 import { readPhoneContextLimit } from '../../config/context-settings.js';
+import {
+    extractImagePromptItems,
+    isImagePromptItem,
+    parseImagePromptDescriptionPair,
+    removeImagePromptItems
+} from '../../config/image-prompt-format.js';
 import { applyPhoneTagFilter } from '../../config/tag-filter.js';
 
 const STORAGE_KEY = 'x_posts';
@@ -47,6 +53,7 @@ export class XData {
         this._followedAccounts = null;
         this._followingPosts = null;
         this._refreshPromise = null;
+        this._feedAbortController = null;
         this._feedGenerationEpoch = 0;
         this._lastAIResponse = null;
     }
@@ -228,13 +235,10 @@ export class XData {
     }
 
     publishUserPost(content = '', images = []) {
-        const textImages = [];
-        const mediaRegex = /\[(用户照片|个人图片|图片(?:-[^\]\r\n]+)?|视频)\]\s*[（(]\s*([^)）]+?)\s*[)）](?:\s*[（(]\s*([^)）]+?)\s*[)）])?/g;
-        const cleanContent = String(content || '')
-            .replace(mediaRegex, (match) => {
-                textImages.push(String(match || '').trim());
-                return '';
-            })
+        const rawContent = String(content || '');
+        const promptItems = extractImagePromptItems(rawContent);
+        const textImages = promptItems.map(item => item.raw.trim()).filter(Boolean);
+        const cleanContent = removeImagePromptItems(rawContent, promptItems)
             .replace(/\n{3,}/g, '\n\n')
             .trim()
             .slice(0, 280);
@@ -245,7 +249,7 @@ export class XData {
             .map((image) => String(image || '').trim())
             .filter((image) => (
                 /^\/backgrounds\//i.test(image)
-                || /^\[(?:用户照片|个人图片|图片(?:-[^\]\r\n]+)?|视频)\]\s*[（(]\s*[^)）]+?\s*[)）](?:\s*[（(]\s*[^)）]+?\s*[)）])?$/i.test(image)
+                || isImagePromptItem(image)
             ))
             .slice(0, 4);
         if (!cleanContent && cleanImages.length === 0) return null;
@@ -485,14 +489,8 @@ export class XData {
             const descriptions = images.map((image, index) => {
                 const state = post?.imageGenerationStates?.[index];
                 const rawImage = String(image || '').trim();
-                const parts = [];
-                const bracketPattern = /[（(]\s*([\s\S]*?)\s*[)）]/g;
-                let match;
-                while ((match = bracketPattern.exec(rawImage)) !== null) {
-                    const part = String(match[1] || '').trim();
-                    if (part) parts.push(part);
-                }
-                return String(state?.description || state?.prompt || parts[0] || '').trim() || `配图${index + 1}`;
+                const parsed = parseImagePromptDescriptionPair(rawImage);
+                return String(state?.description || state?.prompt || parsed.groups[0] || '').trim() || `配图${index + 1}`;
             });
             sections.push(`配图：${descriptions.join('；')}`);
 
@@ -1289,6 +1287,8 @@ export class XData {
 
     async clearAllPostRecords() {
         this._feedGenerationEpoch += 1;
+        this._feedAbortController?.abort();
+        this._feedAbortController = null;
         const allPosts = [
             ...this.getPosts(),
             ...this.getUserPosts(),
@@ -1352,6 +1352,9 @@ export class XData {
     }
 
     clearCache() {
+        this._feedGenerationEpoch += 1;
+        this._feedAbortController?.abort();
+        this._feedAbortController = null;
         this._posts = null;
         this._profile = null;
         this._userPosts = null;
@@ -1371,7 +1374,7 @@ export class XData {
         if (wechatData) return wechatData;
 
         try {
-            const module = await import('../wechat/wechat-data.js?v=20261002-x-forward-card');
+            const module = await import('../wechat/wechat-data.js?v=20261011-wallet-assets');
             wechatData = new module.WechatData(this.storage);
             if (window.VirtualPhone) window.VirtualPhone.cachedWechatData = wechatData;
             return wechatData;
@@ -1716,20 +1719,37 @@ export class XData {
         const configuredMaxTokens = Number.parseInt(context.max_response_length, 10)
             || Number.parseInt(context.max_length, 10)
             || 2048;
-        const result = await this._withTimeout(
-            apiManager.callAI(messages, {
-                appId: 'x',
-                max_tokens: Math.max(1600, configuredMaxTokens)
-            }),
-            240000,
-            'X 帖子生成超时，请检查网络或稍后重试'
-        );
-
-        if (!result?.success) throw new Error(result?.error || 'X 帖子生成失败');
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        this._feedAbortController = controller;
+        let observedStreamEndReason = '';
+        let result;
+        try {
+            result = await this._withTimeout(
+                apiManager.callAI(messages, {
+                    appId: 'x',
+                    max_tokens: Math.max(1600, configuredMaxTokens),
+                    signal: controller?.signal,
+                    onStreamEnd: reason => { observedStreamEndReason = String(reason || ''); }
+                }),
+                240000,
+                'X 帖子生成超时，已中断本次后台请求',
+                () => controller?.abort()
+            );
+        } finally {
+            if (this._feedAbortController === controller) this._feedAbortController = null;
+        }
         if (generationEpoch !== this._feedGenerationEpoch) return [];
+        if (!result?.success) throw new Error(result?.error || 'X 帖子生成失败');
 
         const rawText = String(result.summary || result.content || result.text || '').trim();
         const filteredText = String(applyPhoneTagFilter(rawText, { storage: this.storage }) || '').trim();
+        const streamEndReason = String(result.streamEndReason || observedStreamEndReason || '').trim();
+        const tokenLimitTruncated = result.truncated === true
+            || /内容已因达到最大Token限制而截断/.test(rawText);
+        const streamInterrupted = streamEndReason === '读取失败或中断'
+            || streamEndReason.includes('未收到 [DONE]');
+        const rawHasOpeningTag = /<\s*Twitter\b[^>]*>/i.test(rawText);
+        const rawHasClosingTag = /<\s*\/\s*Twitter\s*>/i.test(rawText);
         const rawHasTwitterTag = /<\s*Twitter\b[^>]*>[\s\S]*?<\s*\/\s*Twitter\s*>/i.test(rawText);
         const filteredHasTwitterTag = /<\s*Twitter\b[^>]*>[\s\S]*?<\s*\/\s*Twitter\s*>/i.test(filteredText);
         const cleanedText = filteredHasTwitterTag || !rawHasTwitterTag
@@ -1738,11 +1758,33 @@ export class XData {
         this._lastAIResponse = { rawText, cleanedText };
         const parsedPosts = this.parseTwitterContent(cleanedText);
         if (parsedPosts.length === 0) {
-            const error = new Error('X 帖子解析失败，模型未按 <Twitter> 格式返回');
+            const failureKind = tokenLimitTruncated
+                ? 'token_limit'
+                : streamInterrupted
+                    ? 'stream_interrupted'
+                    : (rawHasOpeningTag && !rawHasClosingTag ? 'incomplete_tag' : 'parse_error');
+            const failureMessage = failureKind === 'token_limit'
+                ? 'X 帖子生成达到模型最大 Token 限制，返回内容被截断'
+                : failureKind === 'stream_interrupted'
+                    ? 'X 帖子流式传输提前结束，未收到完整响应'
+                    : failureKind === 'incomplete_tag'
+                        ? 'X 帖子返回中途停止，缺少 </Twitter> 结束标签'
+                        : 'X 帖子解析失败，模型未按 <Twitter> 格式返回';
+            const error = new Error(failureMessage);
             error.xParseFailure = {
                 expectedFormat: '<Twitter>...</Twitter>',
                 rawText,
-                cleanedText
+                cleanedText,
+                failureKind,
+                truncated: tokenLimitTruncated,
+                streamEndReason,
+                finishReason: String(result.finishReason || '').trim(),
+                parsedChunkCount: Number(result.parsedChunkCount) || 0,
+                malformedChunkCount: Number(result.malformedChunkCount) || 0,
+                rawResponseLength: Number(result.rawResponseLength) || 0,
+                responseLength: rawText.length,
+                rawHasOpeningTag,
+                rawHasClosingTag
             };
             throw error;
         }
@@ -1988,8 +2030,15 @@ export class XData {
             if (!normalized || images.includes(normalized)) return;
             images.push(normalized);
         };
-        const mediaPattern = /\[(?:用户照片|个人图片|图片(?:-[^\]\r\n]+)?|视频)\]\s*(?:[（(][^）)\r\n]+[）)](?:\s*[（(][^）)\r\n]+[）)])?|(?:https?:\/\/|\/backgrounds\/)[^\s，,；;]+)?/gi;
-        for (const match of text.matchAll(mediaPattern)) add(match[0]);
+        const promptItems = extractImagePromptItems(text);
+        promptItems.forEach(item => add(item.raw));
+
+        const isInsidePromptItem = index => promptItems.some(item => index >= item.index && index < item.endIndex);
+        const mediaPattern = /\[(?:用户照片|个人图片|图片(?:-[^\]\r\n]+)?|视频)\]\s*(?:(?:https?:\/\/|\/backgrounds\/)[^\s，,；;]+)?/gi;
+        for (const match of text.matchAll(mediaPattern)) {
+            if (isInsidePromptItem(match.index)) continue;
+            add(match[0]);
+        }
 
         const directUrlPattern = /(?:https?:\/\/|\/backgrounds\/)[^\s，,；;)）]+/gi;
         for (const match of text.matchAll(directUrlPattern)) {
@@ -2063,12 +2112,15 @@ export class XData {
         return tones[seed % tones.length];
     }
 
-    async _withTimeout(promise, timeoutMs, message) {
+    async _withTimeout(promise, timeoutMs, message, onTimeout = null) {
         let timer = null;
         return Promise.race([
             promise,
             new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+                timer = setTimeout(() => {
+                    try { onTimeout?.(); } catch (_error) { /* ignore */ }
+                    reject(new Error(message));
+                }, timeoutMs);
             })
         ]).finally(() => {
             if (timer) clearTimeout(timer);

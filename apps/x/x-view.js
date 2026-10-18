@@ -4,7 +4,9 @@
  * ======================================================== */
 
 import { ImageCropper } from '../settings/image-cropper.js';
+import { extractImagePromptItems, parseImagePromptDescriptionPair } from '../../config/image-prompt-format.js';
 import { replacePhoneEmojiTokens } from '../../config/phone-emoji.js';
+import { resolveImageMime } from '../../config/image-mime.js';
 
 const PROFILE_AVATAR = new URL('./assets/profile.jpg', import.meta.url).href;
 const SOL_AVATAR = new URL('./assets/sol-avatar.png', import.meta.url).href;
@@ -27,6 +29,7 @@ export class XView {
         this.composeReturnPage = 'home';
         this.pendingComposeImages = [];
         this.composeUploadInProgress = false;
+        this.composePublishInProgress = false;
         this.composeSessionId = 0;
         this.currentReplyCommentId = null;
         this.isRefreshing = false;
@@ -42,6 +45,128 @@ export class XView {
         this._pendingCommentReactionIds = new Set();
         this._visibleUserPostIds = new Set();
         this._suppressDirectMessageThreadClickUntil = 0;
+        this._activeAIParseFailureClose = null;
+        this._boundRoots = new WeakSet();
+    }
+
+    _showAIParseFailure(error) {
+        const details = error?.xParseFailure;
+        if (!details || typeof document === 'undefined') return false;
+        if (!document.querySelector('.phone-view-current .xapp-root')) return false;
+
+        const phoneScreen = document.querySelector('#phone-panel-content .phone-screen');
+        if (!phoneScreen) return false;
+        this.closeAIParseFailure();
+
+        const expectedFormat = String(details.expectedFormat || '<Twitter>...</Twitter>');
+        const rawText = String(details.rawText || '').trim();
+        const cleanedText = String(details.cleanedText || '').trim();
+        const filterChanged = rawText !== cleanedText;
+        const twitterPattern = /<\s*Twitter\b[^>]*>[\s\S]*?<\s*\/\s*Twitter\s*>/i;
+        const rawHasExpected = twitterPattern.test(rawText);
+        const cleanedHasExpected = twitterPattern.test(cleanedText);
+        const failureKind = String(details.failureKind || 'parse_error');
+        const streamEndReason = String(details.streamEndReason || '').trim();
+        const finishReason = String(details.finishReason || '').trim();
+        const parsedChunkCount = Number(details.parsedChunkCount) || 0;
+        const malformedChunkCount = Number(details.malformedChunkCount) || 0;
+        const rawResponseLength = Number(details.rawResponseLength) || 0;
+        let diagnosis = `模型回复中缺少可识别的 ${expectedFormat}。`;
+        if (failureKind === 'token_limit') {
+            diagnosis = '模型或上游明确报告已达到最大 Token 限制。返回内容本身已经被截断，不是 X 解析器删掉了后半段。';
+        } else if (failureKind === 'stream_interrupted') {
+            diagnosis = '流式响应体在收到 [DONE] 前关闭。后台任务结束不等于浏览器收到了完整响应，当前内容只包含断流前已送达的分片。';
+        } else if (failureKind === 'incomplete_tag') {
+            if (malformedChunkCount > 0) {
+                diagnosis = `流已结束，但有 ${malformedChunkCount} 个 SSE 事件无法完整解析；缺失的 </Twitter> 可能位于这些异常事件中。下方展示的是本次请求实际收集到的正文。`;
+            } else if (finishReason) {
+                diagnosis = `流已正常结束，上游结束原因是“${finishReason}”，但正文缺少 </Twitter>。这表示模型或上游在格式完成前结束，并非 X 标签正则删除了尾部。`;
+            } else {
+                diagnosis = `模型已经输出 ${expectedFormat} 的开头，但本次请求没有返回 </Twitter> 结束标签。X 不会自动发起第二次请求，下方展示的是实际收到的完整正文。`;
+            }
+        } else if (rawHasExpected && !cleanedHasExpected) {
+            diagnosis = `原始回复包含 ${expectedFormat}，但标签过滤后关键格式消失。`;
+        } else if (cleanedHasExpected) {
+            diagnosis = `回复看起来包含 ${expectedFormat}，但内部字段、分隔符或语法未被解析器识别。`;
+        }
+
+        const fullResponse = value => String(value || '').trim() || '[模型返回为空]';
+        const responseLength = Number(details.responseLength) || rawText.length;
+        const tagStatus = details.rawHasOpeningTag && !details.rawHasClosingTag
+            ? '已找到 <Twitter>，缺少 </Twitter>'
+            : (rawHasExpected ? '已找到完整 <Twitter> 标签' : '未找到完整 <Twitter> 标签');
+        const statusItems = [
+            details.truncated === true ? '模型结束原因：达到最大 Token 限制' : '',
+            streamEndReason ? `流结束状态：${streamEndReason}` : '',
+            finishReason ? `上游结束原因：${finishReason}` : '',
+            parsedChunkCount ? `已解析流分片：${parsedChunkCount} 个` : '',
+            malformedChunkCount ? `无法解析的流分片：${malformedChunkCount} 个` : '',
+            rawResponseLength ? `原始流数据：${rawResponseLength.toLocaleString('zh-CN')} 个字符` : '',
+            `收到正文：${responseLength.toLocaleString('zh-CN')} 个字符`,
+            `标签状态：${tagStatus}`
+        ].filter(Boolean);
+        const overlay = document.createElement('div');
+        overlay.className = 'xapp-ai-parse-error-overlay';
+        overlay.innerHTML = `
+            <section class="xapp-ai-parse-error-dialog" role="dialog" aria-modal="true" aria-labelledby="xapp-ai-parse-error-title" tabindex="-1">
+                <header class="xapp-ai-parse-error-header">
+                    <div>
+                        <span>AI 回复诊断</span>
+                        <h3 id="xapp-ai-parse-error-title">X 帖子解析失败</h3>
+                    </div>
+                    <button type="button" class="xapp-ai-parse-error-close" aria-label="关闭" title="关闭">
+                        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                    </button>
+                </header>
+                <div class="xapp-ai-parse-error-body">
+                    <p class="xapp-ai-parse-error-note">${this._escapeHtml(diagnosis)}</p>
+                    <ul class="xapp-ai-parse-error-meta">
+                        ${statusItems.map(item => `<li>${this._escapeHtml(item)}</li>`).join('')}
+                    </ul>
+                    <section class="xapp-ai-parse-error-section">
+                        <strong>模型原始回复</strong>
+                        <pre class="xapp-ai-parse-error-response">${this._escapeHtml(fullResponse(rawText || cleanedText))}</pre>
+                    </section>
+                    ${filterChanged ? `
+                        <section class="xapp-ai-parse-error-section">
+                            <strong>标签过滤后内容</strong>
+                            <pre class="xapp-ai-parse-error-response">${this._escapeHtml(fullResponse(cleanedText))}</pre>
+                        </section>
+                    ` : ''}
+                </div>
+                <footer class="xapp-ai-parse-error-footer">
+                    <button type="button" class="xapp-ai-parse-error-confirm">
+                        <i class="fa-solid fa-xmark" aria-hidden="true"></i><span>关闭</span>
+                    </button>
+                </footer>
+            </section>`;
+        phoneScreen.appendChild(overlay);
+
+        const close = () => {
+            overlay.remove();
+            if (this._activeAIParseFailureClose === close) this._activeAIParseFailureClose = null;
+        };
+        this._activeAIParseFailureClose = close;
+        overlay.querySelector('.xapp-ai-parse-error-close')?.addEventListener('click', close, { once: true });
+        overlay.querySelector('.xapp-ai-parse-error-confirm')?.addEventListener('click', close, { once: true });
+        overlay.addEventListener('click', event => {
+            if (event.target === overlay) close();
+        });
+        overlay.querySelector('.xapp-ai-parse-error-dialog')?.focus?.();
+        return true;
+    }
+
+    closeAIParseFailure() {
+        if (this._activeAIParseFailureClose) {
+            this._activeAIParseFailureClose();
+            return true;
+        }
+        const overlay = typeof document !== 'undefined'
+            ? document.querySelector('.xapp-ai-parse-error-overlay')
+            : null;
+        if (!overlay) return false;
+        overlay.remove();
+        return true;
     }
 
     render() {
@@ -214,8 +339,7 @@ export class XView {
     }
 
     _countComposeTextImages(rawText = '') {
-        const mediaRegex = /\[(?:用户照片|个人图片|图片(?:-[^\]\r\n]+)?|视频)\]\s*[（(]\s*([^)）]+?)\s*[)）](?:\s*[（(]\s*([^)）]+?)\s*[)）])?/g;
-        return (String(rawText || '').match(mediaRegex) || []).length;
+        return extractImagePromptItems(rawText).length;
     }
 
     _insertComposeTextImageTemplate(textarea) {
@@ -963,6 +1087,8 @@ export class XView {
 
     bindEvents(root = document.querySelector('.phone-view-current .xapp-root')) {
         if (!root) return;
+        if (this._boundRoots.has(root)) return;
+        this._boundRoots.add(root);
 
         root.querySelectorAll('.xapp-bottom-item[data-page]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -1832,6 +1958,7 @@ export class XView {
         if (countElement) countElement.textContent = String(count);
         if (publishButton) {
             publishButton.disabled = this.composeUploadInProgress
+                || this.composePublishInProgress
                 || (!String(textarea?.value || '').trim() && this.pendingComposeImages.length === 0);
         }
         if (addImageButton) {
@@ -1843,15 +1970,29 @@ export class XView {
     }
 
     publishComposePost(root = document.querySelector('.phone-view-current .xapp-root')) {
-        if (this.composeUploadInProgress) return null;
+        if (this.composeUploadInProgress || this.composePublishInProgress) return null;
         const content = String(root?.querySelector('#xapp-compose-text')?.value || '').trim();
         const textImageCount = this._countComposeTextImages(content);
         if (this.pendingComposeImages.length + textImageCount > 4) {
             this.app.phoneShell.showNotification?.('X', '上传图片和文字图片合计最多 4 张', '×');
             return null;
         }
-        const post = this.app.xData.publishUserPost(content, this.pendingComposeImages);
+        this.composePublishInProgress = true;
+        this.syncComposeControls(root);
+
+        let post = null;
+        try {
+            post = this.app.xData.publishUserPost(content, this.pendingComposeImages);
+        } catch (error) {
+            console.error('[X] 发布帖子失败:', error);
+            this.composePublishInProgress = false;
+            this.syncComposeControls(root);
+            this.app.phoneShell.showNotification?.('X', error?.message || '帖子发布失败', '×');
+            return null;
+        }
         if (!post) {
+            this.composePublishInProgress = false;
+            this.syncComposeControls(root);
             this.app.phoneShell.showNotification?.('X', '请输入内容或添加图片', '×');
             return null;
         }
@@ -2257,6 +2398,7 @@ export class XView {
             console.error('[X] 刷新帖子失败:', error);
             this._refreshStatus = 'error';
             this.syncRefreshIndicator(root);
+            this._showAIParseFailure(error);
             this.app.phoneShell.showNotification?.('X', error?.message || '帖子刷新失败', '×');
         } finally {
             this.isRefreshing = false;
@@ -2395,7 +2537,12 @@ export class XView {
             }
             const response = await fetch(image, { cache: 'no-store' });
             if (!response.ok) throw new Error(`读取生图结果失败（HTTP ${response.status}）`);
-            uploaded = await uploadManager.uploadBlob(await response.blob(), 'x_img');
+            const blob = await response.blob();
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            // Some image hosts return generic or missing Content-Type headers.
+            const mime = resolveImageMime(bytes, blob.type);
+            if (!bytes.length || !mime) throw new Error('X 生图结果不是有效图片');
+            uploaded = await uploadManager.uploadBlob(new Blob([bytes], { type: mime }), 'x_img');
         }
 
         const normalized = String(uploaded || '').trim();
@@ -2565,6 +2712,7 @@ export class XView {
         this.composeReturnPage = ['home', 'profile'].includes(this.currentPage) ? this.currentPage : 'home';
         this.pendingComposeImages = [];
         this.composeUploadInProgress = false;
+        this.composePublishInProgress = false;
         this.composeSessionId += 1;
         this.currentPage = 'compose';
         this.currentPostId = null;
@@ -2577,6 +2725,7 @@ export class XView {
         const abandonedImages = [...this.pendingComposeImages];
         this.pendingComposeImages = [];
         this.composeUploadInProgress = false;
+        this.composePublishInProgress = false;
         this.composeSessionId += 1;
         this.currentPage = this.composeReturnPage === 'profile' ? 'profile' : 'home';
         this.composeReturnPage = 'home';
@@ -2827,18 +2976,12 @@ export class XView {
         const realUrl = /^\/(?:backgrounds)\//i.test(stateUrl) || /^https?:\/\//i.test(stateUrl)
             ? stateUrl
             : String(directMatch?.[1] || '').trim();
-        const parts = [];
-        const bracketPattern = /[（(]\s*([\s\S]*?)\s*[)）]/g;
-        let match;
-        while ((match = bracketPattern.exec(text)) !== null) {
-            const part = String(match[1] || '').trim();
-            if (part) parts.push(part);
-        }
+        const parsed = parseImagePromptDescriptionPair(text);
 
         const stateDescription = String(state?.description || '').trim();
         const statePrompt = String(state?.prompt || '').trim();
-        const description = stateDescription || parts[0] || '';
-        const prompt = statePrompt || (parts.length >= 2 ? parts.slice(1).join(', ') : (parts[0] || ''));
+        const description = stateDescription || parsed.groups[0] || '';
+        const prompt = statePrompt || (parsed.groups.length > 0 ? parsed.prompt : '');
         return { realUrl, description, prompt };
     }
 

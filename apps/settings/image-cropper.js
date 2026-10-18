@@ -122,6 +122,20 @@ export class ImageCropper {
         });
     }
 
+    async openUrl(source) {
+        const url = String(source || '').trim();
+        if (!url) throw new Error('图片地址为空');
+        const response = await fetch(url, { credentials: 'same-origin' });
+        if (!response.ok) throw new Error(`读取头像失败（${response.status}）`);
+        const blob = await response.blob();
+        const pathName = url.split(/[?#]/)[0].split('/').pop() || 'avatar.png';
+        const type = /^image\//i.test(blob.type) ? blob.type : (/\.jpe?g$/i.test(pathName) ? 'image/jpeg' : (/\.webp$/i.test(pathName) ? 'image/webp' : 'image/png'));
+        const file = new File([blob], /\.[a-z0-9]+$/i.test(pathName) ? pathName : `${pathName}.png`, {
+            type
+        });
+        return this.open(file);
+    }
+
     // 显示裁剪界面
     showCropper(resolve, reject) {
         const viewportWidth = Number(window.visualViewport?.width || window.innerWidth || 0);

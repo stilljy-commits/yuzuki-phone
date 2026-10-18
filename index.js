@@ -17,24 +17,39 @@
 import { tokenizeWangxiangTaskTags } from './apps/wangxiang/wangxiang-task-parser.js';
 import { PhoneCallData, parseSmsMessagesFromText } from './apps/phone/phone-data.js';
 import { showIncomingSmsPopup } from './apps/phone/sms-popup.js';
-import { PhoneFloatingEntry } from './phone/floating-entry.js';
-import { parseWechatVoiceContent } from './apps/wechat/voice-text.js';
+import {
+    getPhoneFloatingEntryReceiptFile,
+    PHONE_FLOATING_ENTRY_DEFAULT_STYLE,
+    PhoneFloatingEntry
+} from './phone/floating-entry.js';
+import {
+    getOfflineWechatPaymentLedgerCopy,
+    markCompleteOfflineWechatPaymentBoundaries,
+    parseOfflineWechatPayments,
+    renderOfflineWechatPaymentReceipt
+} from './apps/wechat/offline-payment.js?v=1.6.1&r=20261011-payment-boundaries-and-flexible-years';
+import { parseWechatVoiceContent } from './apps/wechat/voice-text.js?v=20261018-integration';
 import { StoryImageAutoScheduler } from './apps/album/story-image-auto-scheduler.js';
+import {
+    combineMofoBeautifyTemplate,
+    escapeMofoHtml,
+    scopeMofoCss,
+    splitMofoBeautifyTemplate
+} from './apps/mofo/mofo-renderer.js';
 
 const ST_PHONE_BASE_URL = new URL('./', import.meta.url).href;
-const ST_PHONE_VERSION = '1.5.9';
-const ST_PHONE_CSS_REVISION = '20261005-home-icon-first-tap';
+const ST_PHONE_VERSION = '1.6.3-p2';
+const ST_PHONE_CSS_REVISION = '20261018-integration';
 const ST_PHONE_APP_SWIPE_REVISION = '20261002-wechat-chat-return';
-const ST_PHONE_ALBUM_MODULE_REVISION = '20261004-story-image-header-glass';
-const ST_PHONE_WECHAT_MODULE_REVISION = '20261004-moments-image-cancel';
+const ST_PHONE_ALBUM_MODULE_REVISION = '20261006-story-image-outside-close';
+const ST_PHONE_WECHAT_MODULE_REVISION = '20261018-integration';
 const ST_PHONE_WEIBO_MODULE_REVISION = '20261002-first-return-guard';
-const ST_PHONE_X_MODULE_REVISION = '20261005-x-post-menu-auto-width';
+const ST_PHONE_X_MODULE_REVISION = '20261010-publish-guard';
 const ST_PHONE_HONEY_ASSET_REVISION = '20261003-theme-media-recovery';
 const ST_PHONE_GLOBAL_CSS_URL = new URL(`./phone.css?v=${ST_PHONE_VERSION}&r=${ST_PHONE_CSS_REVISION}`, import.meta.url).href;
 const ST_PHONE_REGULAR_FONT_URL = new URL('./assets/vendor/fontawesome/fa-regular-400.woff2', import.meta.url).href;
 const ST_PHONE_HONEY_MODULE_URL = new URL(`./apps/honey/honey-app.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_HONEY_ASSET_REVISION}`, import.meta.url).href;
 const ST_PHONE_HONEY_CSS_URL = new URL(`./apps/honey/honey.css?v=${ST_PHONE_VERSION}&r=${ST_PHONE_HONEY_ASSET_REVISION}`, import.meta.url).href;
-const ST_PHONE_HONEY_LOGO_URL = new URL('./apps/honey/honey.png', import.meta.url).href;
 const ST_PHONE_HONEY_THEME_URL = new URL('./apps/honey/honeyzt.png', import.meta.url).href;
 const ST_PHONE_GAMES_MODULE_URL = new URL(`./apps/games/games-app.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_APP_SWIPE_REVISION}`, import.meta.url).href;
 const ST_PHONE_GAMES_CSS_URL = new URL('./apps/games/poker/poker.css?v=1.0.2', import.meta.url).href;
@@ -58,6 +73,72 @@ const LOBBY_WECHAT_ONLINE_PROACTIVE_PENDING_KEY = 'phone_lobby_wechat_online_pro
 const WECHAT_MESSAGE_SOUND_ENABLED_KEY = 'wechat_message_sound_enabled';
 const PHONE_TRIPLE_TAP_ENABLED_KEY = 'phone-triple-tap-enabled';
 const STORY_IMAGE_AUTO_ENABLED_KEY = 'phone-story-image-auto-enabled';
+const PHONE_PROMPT_MACRO_NAMES = Object.freeze([
+    'PHONE_PROMPT',
+    'PHONE_HISTORY',
+    'PHONE_APP_HISTORY',
+    'MOMENTS_HISTORY',
+    'HONEY_HISTORY',
+    'WEIBO_HISTORY',
+    'MUSIC_PROMPT',
+    'MOFO_PROMPT',
+    'DIARY_HISTORY',
+    'CALENDAR_REMINDER',
+    'WANGXIANG_TASKS',
+    'WANGXIANG_ORDERS'
+]);
+const PHONE_PROMPT_MARKER_PREFIX = '__ST_PHONE_PROMPT_VAR_';
+const getPhonePromptMarker = (name) => `${PHONE_PROMPT_MARKER_PREFIX}${String(name || '').trim().toUpperCase()}__`;
+const PHONE_REQUEST_MACRO_PATTERN = new RegExp(
+    `(?:\\{\\{\\s*(?:${PHONE_PROMPT_MACRO_NAMES.join('|')})\\s*\\}\\}|${PHONE_PROMPT_MARKER_PREFIX}(?:${PHONE_PROMPT_MACRO_NAMES.join('|')})__)`,
+    'i'
+);
+
+function stripPhonePromptPlaceholders(value) {
+    let text = String(value || '');
+    let changed = false;
+    PHONE_PROMPT_MACRO_NAMES.forEach((name) => {
+        const rawPattern = new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, 'gi');
+        const marker = getPhonePromptMarker(name);
+        const next = text.replace(rawPattern, '').split(marker).join('');
+        if (next !== text) {
+            text = next;
+            changed = true;
+        }
+    });
+    return { text: text.trim(), changed };
+}
+
+function substitutePhoneInjectedMacros(value, context) {
+    const rawContent = String(value ?? '');
+    const substituteParams = context?.substituteParams;
+    if (!rawContent || typeof substituteParams !== 'function') return rawContent;
+
+    const protectedMacros = [];
+    let contentForSubstitution = rawContent;
+    PHONE_PROMPT_MACRO_NAMES.forEach((name) => {
+        const rawPattern = new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, 'gi');
+        contentForSubstitution = contentForSubstitution.replace(rawPattern, (matchedMacro) => {
+            const token = `__ST_PHONE_PROTECTED_PROMPT_MACRO_${protectedMacros.length}__`;
+            protectedMacros.push({ token, matchedMacro });
+            return token;
+        });
+    });
+
+    try {
+        const substituted = substituteParams.call(context, contentForSubstitution);
+        if (substituted === undefined || substituted === null) return rawContent;
+
+        let resolvedContent = String(substituted);
+        protectedMacros.forEach(({ token, matchedMacro }) => {
+            resolvedContent = resolvedContent.split(token).join(matchedMacro);
+        });
+        return resolvedContent;
+    } catch (error) {
+        console.warn('[手机插件] 酒馆宏变量替换失败，将保留注入原文:', error);
+        return rawContent;
+    }
+}
 const WECHAT_INITIAL_ENABLED_OFFLINE_KEYS = [
     'offline-wechat-prompt-enabled',
     'offline-single-chat-enabled',
@@ -66,15 +147,13 @@ const WECHAT_INITIAL_ENABLED_OFFLINE_KEYS = [
 const WECHAT_MESSAGE_SOUND_URL = new URL('./assets/sounds/iphone-message-notification.mp3', ST_PHONE_BASE_URL).href;
 const ST_PHONE_CURRENT_UPDATE = {
     version: ST_PHONE_VERSION,
-    date: '2026-10-03',
+    date: '2026-10-18',
     items: [
-        '【修复】修复蜜语保存的主题视频失效后仍反复请求旧地址并误报自动播放失败的问题；失效媒体会自动清除并恢复默认背景。',
-        '【修复】修复微信语音条发送后，文字内容没有正确转入聊天上下文的问题。',
-        '【优化】优化微信单聊上下文注入，聊天时会同时注入当前好友的朋友圈历史记录，避免串入其他好友内容。',
-        '【新增】新增 X APP，支持公开信息流、帖子图片、评论与回复、个人主页、生成设置及按聊天窗口独立存储。',
-        '【新增】新增正文生图功能，设置入口划分为相册 APP；双击手机悬浮图标可进入手动正文生图界面。',
-        '【优化】优化电脑端手机关闭逻辑，手机打开后单击机身外部即可关闭，三击打开方式保持不变。'
-    ]
+        "【整合】基于原版 1.6.3，保留豆包音色池、稳定自动分配与联系人手动选音。",
+        "【新增】人物详情优先展示，首次查看整理资料，支持手动刷新和编辑。",
+        "【新增】微信聊天支持让对方先说，语音条和通话显示心情、语气。",
+        "【完善】相册好友头像与群头像也可缩放裁剪、调整取景区域。"
+]
 };
 
 // 🔥 防重复加载检查（放在最前面，避免任何代码执行）
@@ -83,6 +162,36 @@ if (window.GGP_Loaded) {
 } else {
     window.GGP_Loaded = true;
     console.log(`🚀 虚拟手机 v${ST_PHONE_VERSION} 启动`);
+
+    const PHONE_FOREGROUND_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
+    const phoneForegroundGenerationState = {
+        active: false,
+        type: '',
+        markedAt: 0,
+        source: ''
+    };
+    const markPhoneForegroundGeneration = (type, source = 'unknown', isDryRun = false) => {
+        const generationType = String(type || 'normal').trim().toLowerCase();
+        if (isDryRun || !PHONE_FOREGROUND_GENERATION_TYPES.has(generationType)) return false;
+        phoneForegroundGenerationState.active = true;
+        phoneForegroundGenerationState.type = generationType;
+        phoneForegroundGenerationState.markedAt = Date.now();
+        phoneForegroundGenerationState.source = source;
+        return true;
+    };
+    const clearPhoneForegroundGeneration = () => {
+        phoneForegroundGenerationState.active = false;
+        phoneForegroundGenerationState.type = '';
+        phoneForegroundGenerationState.markedAt = 0;
+        phoneForegroundGenerationState.source = '';
+    };
+    const isPhoneForegroundGenerationActive = () => phoneForegroundGenerationState.active
+        && (Date.now() - phoneForegroundGenerationState.markedAt) < 180000;
+
+    // 官方早期拦截链只记录本次是否属于正文生成；实际消息格式转换仍在 prompt-ready 完成。
+    globalThis.yuzukiPhoneGenerateInterceptor = async function (_chat, _contextSize, _abort, type = 'normal') {
+        markPhoneForegroundGeneration(type, 'generate_interceptor', false);
+    };
 
     // 🔥 核心模块（启动时加载）- 只加载最必要的
     let APPS, PhoneStorage;
@@ -102,6 +211,7 @@ if (window.GGP_Loaded) {
     // 🔥 三击唤醒手势状态
     let phoneTapCount = 0;
     let phoneLastTapTime = 0;
+    let phonePointerSequenceStartedInside = false;
 
     // 🔥 延迟初始化的变量
     let phoneShell = null;
@@ -125,6 +235,8 @@ if (window.GGP_Loaded) {
     let _phoneStableViewportWidth = 0;
     let _phoneViewportResizeTimer = null;
     let _phoneViewportSettleTimer = null;
+    let _phoneViewportWatchdogTimer = null;
+    let _phoneViewportWatchdogUntil = 0;
     let _phoneKeyboardLikelyOpenUntil = 0;
     let _phoneHostKeyboardOffset = 0;
     let _phoneVirtualKeyboardOffset = 0;
@@ -149,6 +261,12 @@ if (window.GGP_Loaded) {
     const _forcedReplayFloors = new Map(); // key: `${chatId}:${floor}`, value: expireAt
     const _exactReplayFloors = new Map(); // key: `${chatId}:${floor}`, value: expireAt
     const _pendingPromptCleanupFloors = new Map(); // key: `${chatId}:${floor}`, value: expireAt
+    let _mofoBubbleSyncRevision = 0;
+    let _mofoMessageFormatterBound = false;
+    let _paymentMessageFormatterBound = false;
+    let _mofoInlinePreviewBound = false;
+    let _mofoInlineTokenSequence = 0;
+    const _mofoInlineRenderCache = new Map();
 
     function markWechatOnlineToOfflineTransferPending(payload = {}) {
         _pendingWechatOnlineToOfflineHint = {
@@ -271,15 +389,6 @@ if (window.GGP_Loaded) {
                 link.href = ST_PHONE_HONEY_MODULE_URL;
                 document.head.appendChild(link);
             }
-            if (!document.getElementById('honey-logo-preload')) {
-                const link = document.createElement('link');
-                link.id = 'honey-logo-preload';
-                link.rel = 'preload';
-                link.as = 'image';
-                link.href = ST_PHONE_HONEY_LOGO_URL;
-                document.head.appendChild(link);
-            }
-            ensureHoneyThemePreloaded();
             ensureHoneyCSSPreloaded();
             loadHoneyModule().catch(error => console.warn('⚠️ 蜜语模块预加载失败，点击时将重试:', error));
         } catch (error) {
@@ -546,10 +655,24 @@ if (window.GGP_Loaded) {
         return hasCoarsePrimaryPointer && !hasDesktopPointer && viewportWidth > 0 && viewportWidth <= 900;
     }
 
+    function isPhoneTypingTarget(target) {
+        if (!(target instanceof Element)) return false;
+        const field = target.closest?.('textarea, input, [contenteditable]');
+        if (!field) return false;
+        if (field.tagName?.toLowerCase() === 'textarea' || field.isContentEditable) return true;
+        const inputType = String(field.type || 'text').toLowerCase();
+        return ['text', 'search', 'password', 'email', 'number', 'url', 'tel'].includes(inputType);
+    }
+
+    function setPhoneViewportProperty(style, name, value) {
+        if (style.getPropertyValue(name) === value) return;
+        style.setProperty(name, value);
+    }
+
     function updatePhonePanelViewportHeight(options = {}) {
         const panel = document.getElementById('phone-panel');
         const root = document.documentElement;
-        if (!root) return;
+        if (!root || !panel) return;
 
         const viewport = window.visualViewport;
         const layoutHeight = Math.max(
@@ -569,11 +692,7 @@ if (window.GGP_Loaded) {
         const keyboardGap = layoutHeight && visualHeight ? layoutHeight - visualHeight : 0;
         const stableGap = _phoneStableViewportHeight ? _phoneStableViewportHeight - visualHeight : 0;
         const activeElement = document.activeElement;
-        const activeTag = String(activeElement?.tagName || '').toLowerCase();
-        const activeInputType = String(activeElement?.type || 'text').toLowerCase();
-        const isTypingTarget = activeTag === 'textarea'
-            || (activeTag === 'input' && ['text', 'search', 'password', 'email', 'number', 'url', 'tel'].includes(activeInputType))
-            || activeElement?.isContentEditable;
+        const isTypingTarget = isPhoneTypingTarget(activeElement);
         const now = Date.now();
         const hasVisualKeyboardViewportGap = keyboardGap > 120 || stableGap > 120;
         const hadVisualKeyboardViewportGap = _phoneVisualKeyboardViewportOpen;
@@ -583,6 +702,11 @@ if (window.GGP_Loaded) {
             : 0;
         const hostSafeBottom = Math.max(0, Number.parseFloat(getComputedStyle(root).getPropertyValue('--tt-inset-bottom')) || 0);
         const hostCssKeyboardOffset = Math.max(hostImeBottom - hostSafeBottom, 0);
+        const liveVirtualKeyboardOffset = Math.max(
+            0,
+            Number(navigator.virtualKeyboard?.boundingRect?.height) || 0
+        );
+        _phoneVirtualKeyboardOffset = liveVirtualKeyboardOffset;
         const reportedKeyboardOffset = Math.max(
             _phoneHostKeyboardOffset,
             _phoneVirtualKeyboardOffset,
@@ -640,19 +764,20 @@ if (window.GGP_Loaded) {
 
         const panelHeight = Math.max(_phoneStableViewportHeight || currentHeight, currentHeight);
         const panelWidth = Math.max(_phoneStableViewportWidth || currentWidth, currentWidth);
-        root.style.setProperty('--phone-panel-vh', `${Math.round(panelHeight)}px`);
-        root.style.setProperty('--phone-panel-vw', `${Math.round(panelWidth)}px`);
-        root.style.setProperty('--phone-panel-top', '0px');
-        root.style.setProperty('--phone-panel-left', '0px');
+        const viewportStyle = panel.style;
+        setPhoneViewportProperty(viewportStyle, '--phone-panel-vh', `${Math.round(panelHeight)}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-panel-vw', `${Math.round(panelWidth)}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-panel-top', '0px');
+        setPhoneViewportProperty(viewportStyle, '--phone-panel-left', '0px');
         // Some Android shells keep the WebView viewport stable while exposing IME overlap separately (or not at all).
         // Only subtract a reported/estimated inset when visualViewport has not already shrunk.
         const keyboardViewportHeight = hasVisualKeyboardViewportGap
             ? visualHeight
             : visualHeight - (keyboardOpen ? effectiveKeyboardOffset : 0);
-        root.style.setProperty('--phone-keyboard-vh', `${Math.round(Math.max(keyboardViewportHeight, 320))}px`);
-        root.style.setProperty('--phone-keyboard-vw', `${Math.round(Math.max(visualWidth, 320))}px`);
-        root.style.setProperty('--phone-keyboard-top', `${Math.round(Math.max(visualTop, 0))}px`);
-        root.style.setProperty('--phone-keyboard-left', `${Math.round(Math.max(visualLeft, 0))}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-keyboard-vh', `${Math.round(Math.max(keyboardViewportHeight, 320))}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-keyboard-vw', `${Math.round(Math.max(visualWidth, 320))}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-keyboard-top', `${Math.round(Math.max(visualTop, 0))}px`);
+        setPhoneViewportProperty(viewportStyle, '--phone-keyboard-left', `${Math.round(Math.max(visualLeft, 0))}px`);
 
         if (!keyboardOpen && panel?.classList?.contains('phone-panel-open')) {
             applyPhonePanelDesktopPosition();
@@ -679,6 +804,45 @@ if (window.GGP_Loaded) {
         _phoneViewportSettleTimer = setTimeout(() => {
             updatePhonePanelViewportHeight(options);
         }, settleDelay);
+    }
+
+    function stopPhonePanelViewportWatchdog() {
+        clearTimeout(_phoneViewportWatchdogTimer);
+        _phoneViewportWatchdogTimer = null;
+        _phoneViewportWatchdogUntil = 0;
+    }
+
+    function startPhonePanelViewportWatchdog(duration = 1800) {
+        _phoneViewportWatchdogUntil = Math.max(
+            _phoneViewportWatchdogUntil,
+            Date.now() + Math.max(600, Number(duration) || 0)
+        );
+        if (_phoneViewportWatchdogTimer) return;
+
+        const tick = () => {
+            _phoneViewportWatchdogTimer = null;
+            const panel = document.getElementById('phone-panel');
+            if (!panel?.classList?.contains('phone-panel-open')) {
+                stopPhonePanelViewportWatchdog();
+                return;
+            }
+
+            updatePhonePanelViewportHeight({ source: 'watchdog' });
+            const keyboardOpen = panel.classList.contains('phone-keyboard-open');
+            if (!keyboardOpen && Date.now() >= _phoneViewportWatchdogUntil) {
+                stopPhonePanelViewportWatchdog();
+                return;
+            }
+
+            // Keyboard-open polling is intentionally low frequency. It catches browsers that update
+            // visualViewport values but omit the final resize event when the IME is dismissed.
+            const delay = keyboardOpen
+                ? (Date.now() < _phoneViewportWatchdogUntil ? 360 : 900)
+                : 120;
+            _phoneViewportWatchdogTimer = setTimeout(tick, delay);
+        };
+
+        _phoneViewportWatchdogTimer = setTimeout(tick, 80);
     }
 
     function isDesktopPhonePanelDragEnabled() {
@@ -1113,36 +1277,39 @@ if (window.GGP_Loaded) {
             if (panel.classList?.contains('phone-panel-open')) return true;
             return !!(target && typeof panel.contains === 'function' && panel.contains(target));
         };
-        const isTypingTarget = (target) => {
-            if (!(target instanceof Element)) return false;
-            const field = target.closest?.('textarea, input, [contenteditable]');
-            if (!field) return false;
-            if (field.tagName?.toLowerCase() === 'textarea' || field.isContentEditable) return true;
-            const inputType = String(field.type || 'text').toLowerCase();
-            return ['text', 'search', 'password', 'email', 'number', 'url', 'tel'].includes(inputType);
-        };
         const armPhoneKeyboardFallback = () => {
             _phoneKeyboardFallbackSuppressed = false;
             _phoneKeyboardLikelyOpenUntil = Date.now() + 700;
             _phoneKeyboardFallbackArmedAt = Date.now() + 160;
             schedulePhonePanelViewportUpdate({ immediate: true, delay: 40, settleDelay: 180 });
+            startPhonePanelViewportWatchdog(2200);
         };
         const onViewportResize = () => {
             if (!shouldUpdatePhoneViewport()) return;
             schedulePhonePanelViewportUpdate({ delay: 40, settleDelay: 160 });
+            startPhonePanelViewportWatchdog(1800);
         };
         const onViewportScroll = () => {
             if (!shouldUpdatePhoneViewport()) return;
             schedulePhonePanelViewportUpdate({ immediate: true, delay: 40, settleDelay: 140 });
+            startPhonePanelViewportWatchdog(1200);
         };
         const onFocusIn = (event) => {
             if (!shouldUpdatePhoneViewport(event.target)) return;
-            if (isTypingTarget(event.target)) armPhoneKeyboardFallback();
+            if (isPhoneTypingTarget(event.target)) armPhoneKeyboardFallback();
         };
         const onPointerDown = (event) => {
-            if (!shouldUpdatePhoneViewport(event.target) || !isTypingTarget(event.target)) return;
+            if (!shouldUpdatePhoneViewport(event.target) || !isPhoneTypingTarget(event.target)) return;
             // A dismissed Android keyboard can leave the field focused, so focusin will not fire again.
             armPhoneKeyboardFallback();
+        };
+        const onInput = (event) => {
+            const panel = document.getElementById('phone-panel');
+            if (!panel?.contains?.(event.target) || !isPhoneTypingTarget(event.target)) return;
+            if (!panel.classList.contains('phone-keyboard-open')) {
+                schedulePhonePanelViewportUpdate({ immediate: true, delay: 40, settleDelay: 180 });
+            }
+            startPhonePanelViewportWatchdog(1600);
         };
         const onFocusOut = (event) => {
             if (!shouldUpdatePhoneViewport(event.target)) return;
@@ -1151,6 +1318,22 @@ if (window.GGP_Loaded) {
             // 保持键盘态直到 viewport 恢复；900ms 复查用于兼容不补发 resize 的 WebView。
             _phoneKeyboardLikelyOpenUntil = Date.now() + 800;
             schedulePhonePanelViewportUpdate({ immediate: true, delay: 120, settleDelay: 900 });
+            startPhonePanelViewportWatchdog(2400);
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState !== 'visible' || !shouldUpdatePhoneViewport()) return;
+            schedulePhonePanelViewportUpdate({ immediate: true, delay: 60, settleDelay: 300 });
+            startPhonePanelViewportWatchdog(1800);
+        };
+        const onPageShow = () => {
+            if (!shouldUpdatePhoneViewport()) return;
+            schedulePhonePanelViewportUpdate({ immediate: true, delay: 60, settleDelay: 300 });
+            startPhonePanelViewportWatchdog(1800);
+        };
+        const onOrientationChange = () => {
+            if (!shouldUpdatePhoneViewport()) return;
+            schedulePhonePanelViewportUpdate({ immediate: true, delay: 120, settleDelay: 700 });
+            startPhonePanelViewportWatchdog(2600);
         };
 
         if (bindPhonePanelViewportGuards._handlers) {
@@ -1166,6 +1349,10 @@ if (window.GGP_Loaded) {
             document.removeEventListener('focusin', prev.onFocusIn, true);
             document.removeEventListener('focusout', prev.onFocusOut, true);
             document.removeEventListener('pointerdown', prev.onPointerDown, true);
+            document.removeEventListener('input', prev.onInput, true);
+            document.removeEventListener('visibilitychange', prev.onVisibilityChange);
+            window.removeEventListener('pageshow', prev.onPageShow);
+            window.removeEventListener('orientationchange', prev.onOrientationChange);
         }
 
         const virtualKeyboard = navigator.virtualKeyboard || null;
@@ -1173,6 +1360,7 @@ if (window.GGP_Loaded) {
             _phoneVirtualKeyboardOffset = Math.max(0, Number(virtualKeyboard?.boundingRect?.height) || 0);
             if (!shouldUpdatePhoneViewport()) return;
             schedulePhonePanelViewportUpdate({ immediate: true, delay: 40, settleDelay: 180 });
+            startPhonePanelViewportWatchdog(1800);
         };
 
         bindPhonePanelViewportGuards._handlers = {
@@ -1181,6 +1369,10 @@ if (window.GGP_Loaded) {
             onFocusIn,
             onFocusOut,
             onPointerDown,
+            onInput,
+            onVisibilityChange,
+            onPageShow,
+            onOrientationChange,
             onVirtualKeyboardGeometry,
             virtualKeyboard
         };
@@ -1197,6 +1389,10 @@ if (window.GGP_Loaded) {
         document.addEventListener('focusin', onFocusIn, true);
         document.addEventListener('focusout', onFocusOut, true);
         document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('input', onInput, true);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('pageshow', onPageShow, { passive: true });
+        window.addEventListener('orientationchange', onOrientationChange, { passive: true });
     }
 
     async function bindTauriTavernPhoneLayout(panel) {
@@ -1236,6 +1432,7 @@ if (window.GGP_Loaded) {
 
                 if (changed || panel.classList.contains('phone-panel-open')) {
                     schedulePhonePanelViewportUpdate({ immediate: true, delay: 40, settleDelay: 180 });
+                    startPhonePanelViewportWatchdog(1800);
                 }
             });
 
@@ -1272,12 +1469,12 @@ if (window.GGP_Loaded) {
             worldbookManagerModule
         ] = await Promise.all([
             import('./config/apps.js'),
-            import('./config/storage.js'),
-            import('./config/api-manager.js'),
+            import('./config/storage.js?v=20261006-story-upload-console-cleanup'),
+            import('./config/api-manager.js?v=20261009-unified-sse-parser'),
             import('./config/time-manager.js'),    // 👈 取消懒加载
         import('./config/prompt-manager.js?v=20261002-x-follower-sync'),  // 👈 取消懒加载
             import('./config/tts-manager.js?v=20260607-mimo-relay-worker'),
-        import('./config/image-generation-manager.js?v=20261005-nai5-img2img-reference'),
+        import('./config/image-generation-manager.js?v=20261006-nai-queue-lock-retry'),
             import('./config/worldbook-manager.js')
         ]);
 
@@ -1326,7 +1523,7 @@ if (window.GGP_Loaded) {
         ] = await Promise.all([
             import(`./phone/phone-shell.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_CSS_REVISION}`),
             import(`./phone/home-screen.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_CSS_REVISION}`),
-            import(`./apps/settings/image-upload.js?v=${ST_PHONE_VERSION}&r=20261002-x-image-cleanup`)
+            import(`./apps/settings/image-upload.js?v=${ST_PHONE_VERSION}&r=20261006-story-upload-console-cleanup`)
         ]);
 
         PhoneShell = phoneShellModule.PhoneShell;
@@ -1354,7 +1551,7 @@ if (window.GGP_Loaded) {
     // 🔥 按需加载设置模块
     async function loadSettingsModule() {
         if (!SettingsApp) {
-            const module = await import(`./apps/settings/settings-app.js?v=${ST_PHONE_VERSION}-vp1&r=${ST_PHONE_APP_SWIPE_REVISION}`);
+            const module = await import(`./apps/settings/settings-app.js?v=${ST_PHONE_VERSION}&r=${ST_PHONE_APP_SWIPE_REVISION}`);
             SettingsApp = module.SettingsApp;
         }
         return SettingsApp;
@@ -2325,6 +2522,290 @@ if (window.GGP_Loaded) {
         return window.VirtualPhone.cachedMofoData;
     }
 
+    function getMofoInlineScopeClass(item = {}) {
+        const seed = String(item.id || item.tagName || item.name || 'mofo');
+        let hash = 2166136261;
+        for (let index = 0; index < seed.length; index += 1) {
+            hash ^= seed.charCodeAt(index);
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+        }
+        const safeName = seed
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 24) || 'item';
+        return `yzp-mofo-inline-scope-${safeName}-${(hash >>> 0).toString(36)}`;
+    }
+
+    function getMofoHostDocuments() {
+        const documents = new Set();
+        let probe = window;
+        while (probe) {
+            try {
+                if (probe.document) documents.add(probe.document);
+                if (!probe.parent || probe.parent === probe) break;
+                probe = probe.parent;
+            } catch (e) {
+                break;
+            }
+        }
+        return Array.from(documents);
+    }
+
+    function getMofoUserAvatarUrl() {
+        const selectors = [
+            '#user_avatar_block .avatar-container.selected img',
+            '#rm_button_panel_persona img'
+        ];
+        for (const doc of getMofoHostDocuments()) {
+            for (const selector of selectors) {
+                const image = doc.querySelector?.(selector);
+                const source = String(image?.currentSrc || image?.src || image?.getAttribute?.('src') || '').trim();
+                if (source) return source;
+            }
+            const userMessageAvatars = doc.querySelectorAll?.('.mes[is_user="true"] .mesAvatarWrapper .avatar img') || [];
+            for (let index = userMessageAvatars.length - 1; index >= 0; index -= 1) {
+                const image = userMessageAvatars[index];
+                const source = String(image?.currentSrc || image?.src || image?.getAttribute?.('src') || '').trim();
+                if (source) return source;
+            }
+        }
+        return '';
+    }
+
+    function getMofoRuntimeTemplateState(state = {}) {
+        const safeState = (state && typeof state === 'object' && !Array.isArray(state)) ? state : {};
+        const userName = String(getContext?.()?.name1 || '').trim() || '用户';
+        const userAvatar = getMofoUserAvatarUrl();
+        return {
+            ...safeState,
+            用户姓名: userName,
+            用户头像: userAvatar,
+            userName,
+            userAvatar
+        };
+    }
+
+    function createMofoInlineToken(renderedHtml = '') {
+        _mofoInlineTokenSequence += 1;
+        const token = `STPHONEMOFOINLINE${Date.now().toString(36).toUpperCase()}${_mofoInlineTokenSequence.toString(36).toUpperCase()}TOKEN`;
+        _mofoInlineRenderCache.set(token, String(renderedHtml || ''));
+        while (_mofoInlineRenderCache.size > 200) {
+            const oldestKey = _mofoInlineRenderCache.keys().next().value;
+            if (!oldestKey) break;
+            _mofoInlineRenderCache.delete(oldestKey);
+        }
+        return token;
+    }
+
+    function getMofoFormattingMessageIndex(formattingContext = {}, rawText = '') {
+        const directCandidates = [
+            formattingContext.messageIndex,
+            formattingContext.messageId,
+            formattingContext.mesId,
+            formattingContext.index,
+            formattingContext.message?.messageIndex,
+            formattingContext.message?.messageId,
+            formattingContext.message?.mesId
+        ];
+        for (const candidate of directCandidates) {
+            const parsed = Number(candidate);
+            if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+        }
+
+        const source = String(rawText || '').trim();
+        if (!source) return null;
+        const context = getContext?.();
+        const chat = Array.isArray(context?.chat) ? context.chat : [];
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            const message = chat[index];
+            if (!message || message.is_user || message.is_system) continue;
+            if (getMofoMessageText(message).trim() === source) return index;
+        }
+        return null;
+    }
+
+    function getMofoInlineSnapshotState(mofoData, block, rawText, formattingContext = {}) {
+        if (String(block?.item?.processorMode || '').trim().toLowerCase() !== 'funds') return null;
+        const messageIndex = getMofoFormattingMessageIndex(formattingContext, rawText);
+        if (!Number.isInteger(messageIndex)) return null;
+        const history = getMofoBubbleHistory(mofoData, block.item.id);
+        const entry = history.find(candidate => candidate?.messageIndex === messageIndex);
+        return entry?.state && typeof entry.state === 'object' ? entry.state : null;
+    }
+
+    function prepareMofoInlineMessage(rawText, formattingContext = {}) {
+        const source = String(rawText || '');
+        if (!source || formattingContext.isUser || formattingContext.isReasoning) return source;
+        const mofoData = window.VirtualPhone?.cachedMofoData;
+        if (!mofoData?.findTagBlocksFromText || !mofoData?.renderTagBlock) return source;
+
+        const blocks = mofoData.findTagBlocksFromText(source);
+        if (!Array.isArray(blocks) || blocks.length === 0) return source;
+
+        let output = source;
+        blocks.slice().reverse().forEach((block) => {
+            if (block?.item?.inlineRenderEnabled !== true) {
+                output = `${output.slice(0, block.index)}\n\n${output.slice(block.index + block.length)}`;
+                return;
+            }
+            const snapshotState = getMofoInlineSnapshotState(mofoData, block, source, formattingContext);
+            const rendered = mofoData.renderTagBlock(block, snapshotState ? { state: snapshotState } : {});
+            if (!rendered?.html) return;
+            const renderedHtml = typeof mofoData.renderTemplate === 'function'
+                ? mofoData.renderTemplate(
+                    rendered.item?.htmlTemplate || '',
+                    getMofoRuntimeTemplateState(rendered.state)
+                )
+                : rendered.html;
+            const scopeClass = getMofoInlineScopeClass(rendered.item);
+            const scopedCss = scopeMofoCss(rendered.cssText || '', `.${scopeClass}`);
+            const baseCss = `.${scopeClass}{display:block;width:100%;max-width:100%;margin:12px 0;isolation:isolate}`;
+            const styleHtml = `<style>${baseCss}${scopedCss}</style>`;
+            const itemId = escapeMofoHtml(String(rendered.item?.id || ''));
+            const itemName = escapeMofoHtml(String(rendered.item?.name || ''));
+            const bubbleEnabled = rendered.item?.bubbleRenderEnabled === true ? 'true' : 'false';
+            const interactionCss = bubbleEnabled === 'true' ? 'cursor:pointer;' : '';
+            const finalHtml = `${styleHtml}<div class="yzp-mofo-inline-render ${scopeClass}" data-mofo-id="${itemId}" data-mofo-name="${itemName}" data-mofo-bubble-enabled="${bubbleEnabled}" style="${interactionCss}">${renderedHtml}</div>`;
+            const token = createMofoInlineToken(finalHtml);
+            output = `${output.slice(0, block.index)}\n\n${token}\n\n${output.slice(block.index + block.length)}`;
+        });
+        return output;
+    }
+
+    function restoreMofoInlineMessage(renderedMessageHtml) {
+        let html = String(renderedMessageHtml || '');
+        if (!html || _mofoInlineRenderCache.size === 0) return html;
+        Array.from(_mofoInlineRenderCache.entries()).forEach(([token, renderedHtml]) => {
+            if (!html.includes(token)) return;
+            const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            html = html.replace(new RegExp(`<p>\\s*${escapedToken}\\s*<\\/p>`, 'g'), renderedHtml);
+            html = html.replace(new RegExp(escapedToken, 'g'), renderedHtml);
+            _mofoInlineRenderCache.delete(token);
+        });
+        return html;
+    }
+
+    function pruneDisabledMofoInlineRenders() {
+        const mofoData = window.VirtualPhone?.cachedMofoData;
+        if (!mofoData?.getItemById) return 0;
+
+        let removedCount = 0;
+        getMofoHostDocuments().forEach((doc) => {
+            doc.querySelectorAll?.('.yzp-mofo-inline-render[data-mofo-id]').forEach((card) => {
+                const itemId = String(card.getAttribute('data-mofo-id') || '').trim();
+                const item = itemId ? mofoData.getItemById(itemId) : null;
+                if (item?.inlineRenderEnabled === true) return;
+
+                const scopeClass = Array.from(card.classList || [])
+                    .find(className => className.startsWith('yzp-mofo-inline-scope-'));
+                const style = card.previousElementSibling;
+                if (
+                    style?.tagName === 'STYLE'
+                    && (!scopeClass || String(style.textContent || '').includes(`.${scopeClass}`))
+                ) {
+                    style.remove();
+                }
+                card.remove();
+                removedCount += 1;
+            });
+        });
+        return removedCount;
+    }
+
+    function registerMofoInlinePreviewClick() {
+        if (_mofoInlinePreviewBound) return;
+        _mofoInlinePreviewBound = true;
+        document.addEventListener('click', async (event) => {
+            const target = event?.target;
+            const inlineCard = target?.closest?.('.yzp-mofo-inline-render[data-mofo-id][data-mofo-bubble-enabled="true"]');
+            if (!inlineCard) return;
+            if (target.closest?.('a, button, input, textarea, select, [role="button"]')) return;
+            const mofoId = String(inlineCard.getAttribute('data-mofo-id') || '').trim();
+            if (!mofoId) return;
+
+            event.preventDefault?.();
+            await window.VirtualPhone?.showMofoUpdateBubble?.(mofoId);
+
+            let hostWindow = window;
+            try {
+                while (hostWindow.parent && hostWindow.parent !== hostWindow && hostWindow.parent.document?.body) {
+                    hostWindow = hostWindow.parent;
+                }
+            } catch (e) {}
+            hostWindow.document?.querySelector?.('#mofo-global-bubble-root .mofo-update-bubble')?.click?.();
+        });
+    }
+
+    function registerMofoMessageFormatter() {
+        if (_mofoMessageFormatterBound) return true;
+        const formatter = getContext()?.messageFormatter;
+        if (!formatter?.addHook || !formatter?.stage) return false;
+
+        formatter.addHook(prepareMofoInlineMessage, {
+            stage: formatter.stage.BEFORE_REGEX,
+            order: formatter.order?.EARLIEST ?? 0
+        });
+        formatter.addHook(restoreMofoInlineMessage, {
+            stage: formatter.stage.AFTER_MARKDOWN,
+            order: formatter.order?.LATEST ?? 100
+        });
+        _mofoMessageFormatterBound = true;
+        registerMofoInlinePreviewClick();
+        return true;
+    }
+
+    function registerPaymentMessageFormatter() {
+        if (_paymentMessageFormatterBound) return true;
+        const formatter = getContext()?.messageFormatter;
+        if (!formatter?.addHook || !formatter?.stage) return false;
+
+        formatter.addHook((messageText, formattingContext) => {
+            if (formattingContext?.isReasoning) return messageText;
+            return markCompleteOfflineWechatPaymentBoundaries(messageText);
+        }, {
+            stage: formatter.stage.BEFORE_REGEX,
+            order: formatter.order?.EARLIEST ?? 0
+        });
+        _paymentMessageFormatterBound = true;
+        return true;
+    }
+
+    function refreshMofoInlineMessages() {
+        const context = getContext();
+        const chat = Array.isArray(context?.chat) ? context.chat : [];
+        const mofoData = window.VirtualPhone?.cachedMofoData;
+        _mofoInlineRenderCache.clear();
+        pruneDisabledMofoInlineRenders();
+        if (!mofoData?.findTagBlocksFromText || typeof context?.messageFormatting !== 'function') return false;
+
+        // Never replay the whole chat through updateMessageBlock: it destroys foreign
+        // frontends and appendMediaToMessage schedules scroll adjustments afterwards.
+        document.querySelectorAll('#chat > .mes').forEach((element) => {
+            const rawMessageIndex = element.getAttribute('mesid');
+            if (rawMessageIndex === null || rawMessageIndex.trim() === '') return;
+            const messageIndex = Number(rawMessageIndex);
+            const message = chat[messageIndex];
+            const root = element.querySelector('.mes_text');
+            if (!Number.isInteger(messageIndex) || messageIndex < 0 || !message || message.is_user || !root) return;
+            // Keep focus and cursor state when an inline template contains editable controls.
+            if (root.contains(document.activeElement)) return;
+            const text = String(message.extra?.display_text ?? message.mes ?? '');
+            try {
+                if (!mofoData.findTagBlocksFromText(text)?.length) return;
+                // A mixed floor belongs to its frontend renderer; never destroy its runtime.
+                const foreignNodes = root.querySelectorAll('iframe, .TH-render, pre, script, form, input, textarea, select, button, audio, video, canvas, .st-phone-payment-receipt');
+                if (Array.from(foreignNodes).some(node => !node.closest('.yzp-mofo-inline-render'))) return;
+                const html = context.messageFormatting(text, message.name, message.is_system, message.is_user, messageIndex, {}, false);
+                if (root.innerHTML !== html) root.innerHTML = html;
+            } catch (e) {
+                console.warn(`[Mofo] Failed to refresh inline message ${messageIndex}:`, e);
+            }
+        });
+        pruneDisabledMofoInlineRenders();
+        return true;
+    }
+
     function insertTextToSendTextarea(text, cursorOffset = null) {
         const textarea = document.getElementById('send_textarea');
         if (!textarea) return false;
@@ -2345,18 +2826,200 @@ if (window.GGP_Loaded) {
         return true;
     }
 
-    async function processMofoTags(rawText, { source = 'assistant', messageIndex = null } = {}) {
+    async function processMofoTags(rawText, { source = 'assistant', messageIndex = null, messageDateTime = null } = {}) {
         const safeText = String(rawText || '').trim();
         if (!safeText) return [];
 
         try {
             const mofoData = await getOrCreateMofoData();
             if (!mofoData || typeof mofoData.applyTagUpdatesFromText !== 'function') return [];
-            return mofoData.applyTagUpdatesFromText(safeText, { source, messageIndex });
+            const hasFundProcessor = Number.isInteger(messageIndex)
+                && source === 'assistant'
+                && typeof mofoData.rebuildProcessorSessionStateFromTextBlocks === 'function'
+                && (mofoData.getItems?.() || []).some(item => item?.processorMode === 'funds');
+            if (hasFundProcessor) {
+                const context = getContext?.();
+                const chat = Array.isArray(context?.chat) ? context.chat : [];
+                const textBlocks = [];
+                chat.forEach((message, index) => {
+                    if (!message || message.is_user || message.is_system) return;
+                    const text = getMofoMessageText(message);
+                    if (!text) return;
+                    textBlocks.push({
+                        messageIndex: index,
+                        text,
+                        messageDateTime: getMofoMessageDateTime(message)
+                    });
+                });
+                mofoData.rebuildProcessorSessionStateFromTextBlocks('funds', textBlocks, {
+                    source: 'assistant_floor_rebuild'
+                });
+            }
+            let resolvedDateTime = messageDateTime;
+            if (resolvedDateTime === null && Number.isInteger(messageIndex)) {
+                const context = getContext?.();
+                const message = Array.isArray(context?.chat) ? context.chat[messageIndex] : null;
+                resolvedDateTime = getMofoMessageDateTime(message || {});
+            }
+            return mofoData.applyTagUpdatesFromText(safeText, {
+                source,
+                messageIndex,
+                messageDateTime: resolvedDateTime
+            });
         } catch (e) {
             console.warn('⚠️ [魔坊] 标签解析失败:', e);
             return [];
         }
+    }
+
+    async function checkWalletCreditRepayments(currentTime = null) {
+        try {
+            if (!storage) return [];
+            const tm = timeManager || window.VirtualPhone?.timeManager || await loadTimeManager();
+            const latestTime = currentTime || tm?.getCurrentStoryTime?.();
+            if (!latestTime?.date) return [];
+
+            const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
+            if (!window.VirtualPhone) window.VirtualPhone = {};
+            const existingWechatData = window.VirtualPhone.wechatApp?.wechatData
+                || window.VirtualPhone.cachedWechatData
+                || null;
+            if (!window.VirtualPhone.cachedWechatData) {
+                window.VirtualPhone.cachedWechatData = existingWechatData || new module.WechatData(storage);
+            }
+            if (window.VirtualPhone.wechatApp
+                && window.VirtualPhone.wechatApp.wechatData !== window.VirtualPhone.cachedWechatData) {
+                window.VirtualPhone.wechatApp.wechatData = window.VirtualPhone.cachedWechatData;
+            }
+
+            const results = await window.VirtualPhone.cachedWechatData
+                .checkCreditCardAutoRepayments?.(latestTime) || [];
+            if (results.some(result => result.success) && document.querySelector('.wechat-wallet-ledger-page')) {
+                window.VirtualPhone.wechatApp?.showWalletPage?.({ section: 'credit' });
+            }
+            return results;
+        } catch (error) {
+            console.warn('[Wechat][Wallet] 信用卡自动还款检测失败:', error);
+            return [];
+        }
+    }
+
+    function getMofoMessageText(message = {}) {
+        const swipeIndex = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
+        if (Array.isArray(message.swipes) && message.swipes.length > 0) {
+            const swipeText = String(message.swipes[swipeIndex] || message.swipes[0] || '');
+            if (swipeText) return swipeText;
+        }
+        return String(message.mes || message.content || '');
+    }
+
+    function getMofoMessageDateTime(message = {}) {
+        const value = message.send_date
+            ?? message.sendDate
+            ?? message.createdAt
+            ?? message.timestamp
+            ?? message.gen_started
+            ?? null;
+        if (value === null || typeof value === 'undefined') return null;
+        if (value instanceof Date) return value;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        return String(value || '').trim() || null;
+    }
+
+    function getMofoBubbleHistory(mofoData, mofoId) {
+        if (!mofoData || typeof mofoData.buildItemHistoryFromTextBlocks !== 'function') return [];
+        const context = getContext?.();
+        const chat = Array.isArray(context?.chat) ? context.chat : [];
+        const textBlocks = [];
+        chat.forEach((message, messageIndex) => {
+            if (!message || message.is_user || message.is_system) return;
+            const text = getMofoMessageText(message);
+            if (!text) return;
+            textBlocks.push({
+                messageIndex,
+                text,
+                messageDateTime: getMofoMessageDateTime(message)
+            });
+        });
+        return mofoData.buildItemHistoryFromTextBlocks(mofoId, textBlocks);
+    }
+
+    function getCurrentMofoBubbleSnapshot(expectedMessageIndex = null, expectedText = null) {
+        const context = getContext?.();
+        const chat = Array.isArray(context?.chat) ? context.chat : [];
+        const latestIndex = chat.length - 1;
+        if (latestIndex < 0) return { context, chat, latestIndex, message: null, text: '' };
+        if (Number.isInteger(expectedMessageIndex) && expectedMessageIndex !== latestIndex) return null;
+
+        const message = chat[latestIndex] || null;
+        const text = getMofoMessageText(message || {});
+        if (expectedText !== null && String(expectedText || '') !== text) return null;
+        return { context, chat, latestIndex, message, text };
+    }
+
+    function isCurrentMofoBubbleSnapshot(snapshot) {
+        if (!snapshot) return false;
+        const current = getCurrentMofoBubbleSnapshot(snapshot.latestIndex, snapshot.text);
+        return !!current && current.message === snapshot.message;
+    }
+
+    function invalidateMofoBubbleSync() {
+        _mofoBubbleSyncRevision += 1;
+        window.VirtualPhone?.hideMofoUpdateBubble?.();
+    }
+
+    async function syncMofoBubbleFromLatestMessage({ messageIndex = null, text = null, updates = null } = {}) {
+        const revision = ++_mofoBubbleSyncRevision;
+        const snapshot = getCurrentMofoBubbleSnapshot(messageIndex, text);
+        if (!snapshot) return null;
+
+        if (!snapshot.message || snapshot.message.is_user || snapshot.message.is_system || !isPhoneFeatureEnabled()) {
+            if (revision === _mofoBubbleSyncRevision) {
+                window.VirtualPhone?.hideMofoUpdateBubble?.();
+            }
+            return null;
+        }
+
+        const mofoData = await getOrCreateMofoData();
+        if (!mofoData) {
+            window.VirtualPhone?.hideMofoUpdateBubble?.();
+            return null;
+        }
+
+        let matches = Array.isArray(updates)
+            ? updates.filter(update => update?.id)
+            : null;
+        if (matches === null) {
+            matches = (typeof mofoData?.findTagMatchesFromText === 'function')
+                ? mofoData.findTagMatchesFromText(snapshot.text, { bubbleOnly: true })
+                : [];
+        }
+        matches = matches.filter((update) => {
+            const item = mofoData.getItemById?.(update?.id);
+            return item?.bubbleRenderEnabled === true;
+        });
+
+        if (revision !== _mofoBubbleSyncRevision || !isCurrentMofoBubbleSnapshot(snapshot)) {
+            return null;
+        }
+
+        const preferred = matches.find(update => update?.changed && update?.id)
+            || matches.find(update => update?.id)
+            || null;
+        if (!preferred) {
+            window.VirtualPhone?.hideMofoUpdateBubble?.();
+            return null;
+        }
+
+        await window.VirtualPhone?.showMofoUpdateBubble?.(preferred.id, {
+            isCurrent: () => revision === _mofoBubbleSyncRevision && isCurrentMofoBubbleSnapshot(snapshot)
+        });
+        return preferred;
+    }
+
+    async function rebuildMofoStateAndSyncBubble() {
+        await rebuildMofoStateFromCurrentChat();
+        return syncMofoBubbleFromLatestMessage();
     }
 
     async function syncMofoItemFromCurrentChat(itemOrId) {
@@ -2416,14 +3079,22 @@ if (window.GGP_Loaded) {
             }
 
             const textBlocks = [];
-            chat.forEach((message) => {
+            chat.forEach((message, messageIndex) => {
                 if (!message || message.is_user) return;
                 const swipeIndex = Number.isInteger(message.swipe_id) ? message.swipe_id : null;
                 if (swipeIndex !== null && Array.isArray(message.swipes) && typeof message.swipes[swipeIndex] !== 'undefined') {
-                    textBlocks.push(String(message.swipes[swipeIndex] || ''));
+                    textBlocks.push({
+                        messageIndex,
+                        text: String(message.swipes[swipeIndex] || ''),
+                        messageDateTime: getMofoMessageDateTime(message)
+                    });
                     return;
                 }
-                textBlocks.push(String(message.mes || message.content || ''));
+                textBlocks.push({
+                    messageIndex,
+                    text: String(message.mes || message.content || ''),
+                    messageDateTime: getMofoMessageDateTime(message)
+                });
             });
             return mofoData.rebuildSessionStateFromTextBlocks(textBlocks, { source: 'current_chat_rebuild' });
         } catch (e) {
@@ -2436,11 +3107,16 @@ if (window.GGP_Loaded) {
     //  新增：魔坊动态更新气泡 & 全局速览弹窗
     // ==========================================
     if (!window.VirtualPhone) window.VirtualPhone = {};
-    window.VirtualPhone.showMofoUpdateBubble = async function (mofoId) {
+    window.VirtualPhone.showMofoUpdateBubble = async function (mofoId, options = {}) {
+        const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
         try {
             const mofoData = await getOrCreateMofoData();
             const item = mofoData?.getItemById?.(mofoId);
-            if (!item) return;
+            if (!item || !isCurrent()) return;
+            if (item.bubbleRenderEnabled !== true) {
+                window.VirtualPhone?.hideMofoUpdateBubble?.();
+                return;
+            }
 
             const hostDoc = (() => {
                 let hostWindow = window;
@@ -2513,9 +3189,10 @@ if (window.GGP_Loaded) {
                             0 7px 14px rgba(0,0,0,0.08);
                         box-sizing: border-box;
                         z-index: 2147483646;
-                        cursor: pointer;
+                        cursor: grab;
                         opacity: 0;
                         pointer-events: auto;
+                        touch-action: none;
                         user-select: none;
                         transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease, filter 0.2s ease;
                     }
@@ -2554,20 +3231,13 @@ if (window.GGP_Loaded) {
                         filter: brightness(1.02);
                     }
                     .mofo-update-bubble:active { transform: translate(-50%, -50%) scale(0.98); }
-                    .mofo-update-bubble.bursting {
-                        pointer-events: none;
-                        animation: mofoBubbleBurst 0.34s ease-out forwards;
-                    }
-                    .mofo-burst-dot {
-                        position: fixed;
-                        width: 6px;
-                        height: 6px;
-                        border-radius: 50%;
-                        background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.95), color-mix(in srgb, var(--mofo-bubble-accent) 26%, rgba(186,232,230,0.28)) 68%, rgba(255,255,255,0));
-                        box-shadow: inset 2px 0 5px rgba(173,216,230,0.45), 0 2px 6px rgba(0,0,0,0.08);
-                        z-index: 2147483646;
-                        pointer-events: none;
-                        animation: mofoBurstDot 0.42s ease-out forwards;
+                    .mofo-update-bubble.is-dragging,
+                    .mofo-update-bubble.is-dragging:hover,
+                    .mofo-update-bubble.is-dragging:active {
+                        cursor: grabbing;
+                        animation: none;
+                        transform: translate(-50%, -50%) scale(1.025);
+                        transition: opacity 0.2s ease, filter 0.2s ease;
                     }
                     .mofo-bubble-rank-mini {
                         position: relative;
@@ -2641,24 +3311,161 @@ if (window.GGP_Loaded) {
                         transform: translate(-50%, -50%);
                         max-width: min(92vw, 920px);
                         max-height: 85vh;
-                        overflow: auto;
-                        touch-action: pan-x pan-y;
+                        overflow: hidden;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: stretch;
                         overscroll-behavior: contain;
                         box-sizing: border-box;
                         animation: mofoPopIn 0.26s cubic-bezier(0.2, 0.8, 0.2, 1);
                     }
+                    #mofo-global-preview-pop .mofo-history-nav {
+                        flex: 0 0 auto;
+                        min-height: 44px;
+                        display: grid;
+                        grid-template-columns: minmax(76px, 1fr) auto minmax(76px, 1fr);
+                        align-items: center;
+                        gap: 8px;
+                        margin: 8px 0 0;
+                        padding: 5px;
+                        border: 1px solid rgba(255,255,255,0.48);
+                        border-radius: 8px;
+                        background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #f7f8fa) 88%, transparent);
+                        box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+                        backdrop-filter: blur(14px);
+                        -webkit-backdrop-filter: blur(14px);
+                        color: var(--SmartThemeBodyColor, #273244);
+                        box-sizing: border-box;
+                    }
+                    #mofo-global-preview-pop .mofo-history-nav[hidden] {
+                        display: none !important;
+                    }
+                    #mofo-global-preview-pop .mofo-history-button {
+                        min-width: 0;
+                        min-height: 34px;
+                        margin: 0;
+                        padding: 5px 9px;
+                        border: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #273244) 20%, transparent);
+                        border-radius: 6px;
+                        background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #fff) 82%, transparent);
+                        color: inherit;
+                        font: inherit;
+                        font-size: 12px;
+                        font-weight: 700;
+                        line-height: 1.2;
+                        letter-spacing: 0;
+                        cursor: pointer;
+                        white-space: nowrap;
+                        box-sizing: border-box;
+                    }
+                    #mofo-global-preview-pop .mofo-history-button:disabled {
+                        opacity: 0.35;
+                        cursor: default;
+                    }
+                    #mofo-global-preview-pop .mofo-history-count {
+                        min-width: 72px;
+                        font-size: 11px;
+                        line-height: 1.25;
+                        font-weight: 700;
+                        letter-spacing: 0;
+                        text-align: center;
+                        white-space: nowrap;
+                    }
+                    #mofo-global-preview-pop .mofo-history-content {
+                        min-width: 0;
+                        min-height: 0;
+                        max-width: 100%;
+                        overflow: auto;
+                        touch-action: pan-x pan-y;
+                        overscroll-behavior: contain;
+                        scrollbar-width: none;
+                        -ms-overflow-style: none;
+                        box-sizing: border-box;
+                    }
+                    #mofo-global-preview-pop .mofo-history-content::-webkit-scrollbar {
+                        width: 0;
+                        height: 0;
+                        display: none;
+                    }
+                    @media (max-width: 640px), (pointer: coarse) {
+                        #mofo-global-preview-pop .mofo-history-nav {
+                            min-height: 48px;
+                            grid-template-columns: minmax(68px, 1fr) auto minmax(68px, 1fr);
+                            gap: 5px;
+                            margin-top: 6px;
+                            padding: 4px;
+                        }
+                        #mofo-global-preview-pop .mofo-history-button {
+                            min-height: 40px;
+                            padding: 4px 7px;
+                            font-size: 12px;
+                        }
+                        #mofo-global-preview-pop .mofo-history-count {
+                            min-width: 62px;
+                            font-size: 10px;
+                        }
+                        #mofo-global-preview-pop .forum-mofo {
+                            width: min(340px, calc(100vw - 28px)) !important;
+                            max-width: calc(100vw - 28px) !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-card {
+                            border-radius: 9px !important;
+                            padding: 14px 13px !important;
+                            margin-bottom: 10px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-author-row { gap: 9px !important; }
+                        #mofo-global-preview-pop .forum-mofo-avatar {
+                            width: 28px !important;
+                            height: 28px !important;
+                            flex-basis: 28px !important;
+                            font-size: 10.5px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-author { font-size: 12px !important; }
+                        #mofo-global-preview-pop .forum-mofo-meta { font-size: 10px !important; }
+                        #mofo-global-preview-pop .forum-mofo-title {
+                            margin: 12px 0 10px !important;
+                            font-size: 15px !important;
+                            line-height: 1.42 !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-content,
+                        #mofo-global-preview-pop .forum-mofo-comment-text {
+                            font-size: 11.5px !important;
+                            line-height: 1.65 !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-content p { margin-bottom: 10px !important; }
+                        #mofo-global-preview-pop .forum-mofo-actions {
+                            gap: 14px !important;
+                            margin-top: 14px !important;
+                            padding-top: 10px !important;
+                            font-size: 10px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-comments-title {
+                            padding-bottom: 10px !important;
+                            margin-bottom: 14px !important;
+                            font-size: 12px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-comment {
+                            gap: 9px !important;
+                            margin-bottom: 18px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-comment-name { font-size: 11.5px !important; }
+                        #mofo-global-preview-pop .forum-mofo-comment-text { margin: 5px 0 !important; }
+                        #mofo-global-preview-pop .forum-mofo-comment-meta {
+                            gap: 10px !important;
+                            font-size: 9.5px !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-nested {
+                            margin-top: 8px !important;
+                            padding: 8px 10px !important;
+                            font-size: 10.5px !important;
+                            line-height: 1.55 !important;
+                        }
+                        #mofo-global-preview-pop .forum-mofo-more { font-size: 9.5px !important; }
+                        #mofo-global-preview-pop .forum-mofo-empty { font-size: 10.5px !important; }
+                    }
                     @keyframes mofoBubbleFloat {
                         0%, 100% { transform: translate(-50%, -50%) scale(1); }
                         50% { transform: translate(-50%, calc(-50% - 12px)) scale(1); }
-                    }
-                    @keyframes mofoBubbleBurst {
-                        0% { transform: translate(-50%, -50%) scale(1); opacity: 1; filter: brightness(1); }
-                        45% { transform: translate(-50%, -50%) scale(1.08); opacity: 0.72; filter: brightness(1.2); }
-                        100% { transform: translate(-50%, -50%) scale(0.22); opacity: 0; filter: blur(2px) brightness(1.35); }
-                    }
-                    @keyframes mofoBurstDot {
-                        0% { transform: translate(-50%, -50%) scale(0.7); opacity: 0.95; }
-                        100% { transform: translate(calc(-50% + var(--mofo-burst-x)), calc(-50% + var(--mofo-burst-y))) scale(0.12); opacity: 0; }
                     }
                     @keyframes mofoPopIn { 0% { transform: translate(-50%, -50%) scale(0.94); opacity: 0; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
                 `;
@@ -2693,6 +3500,16 @@ if (window.GGP_Loaded) {
             `;
             bubbleRoot.appendChild(bubble);
 
+            // Keep the manual position on this bubble instance only.
+            let manualPosition = null;
+            let dragPointerId = null;
+            let dragStartPoint = null;
+            let dragStartPosition = null;
+            let didDragBubble = false;
+            let suppressNextBubbleClick = false;
+            let suppressBubbleClickTimer = null;
+            const BUBBLE_DRAG_THRESHOLD = 6;
+
             const syncBubbleThemeColors = () => {
                 const readPickerColor = (selector) => {
                     const picker = hostDoc.querySelector(selector);
@@ -2717,63 +3534,211 @@ if (window.GGP_Loaded) {
             themeObserver?.observe(hostDoc.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
             bubblePositionController.signal.addEventListener('abort', () => themeObserver?.disconnect(), { once: true });
 
-            const positionBubble = () => {
-                if (!bubble.isConnected) {
-                    bubblePositionController.abort();
-                    return;
-                }
+            const collectBubbleAnchorElements = () => {
+                const sendTextarea = hostDoc.querySelector('#send_textarea');
+                return [
+                    hostDoc.querySelector('#send_form'),
+                    sendTextarea?.closest?.('.chat-input-container, .send_form, form'),
+                    sendTextarea,
+                    hostDoc.querySelector('#form_sheld')
+                ].filter((element, index, elements) => element && elements.indexOf(element) === index);
+            };
+
+            const getBubbleViewportBounds = () => {
                 const vv = hostWin.visualViewport;
                 const viewWidth = vv?.width || hostWin.innerWidth || window.innerWidth;
                 const viewHeight = vv?.height || hostWin.innerHeight || window.innerHeight;
                 const offsetLeft = vv?.offsetLeft || 0;
                 const offsetTop = vv?.offsetTop || 0;
+                const bubbleHalfWidth = Math.max(18, (bubble.offsetWidth || 44) / 2);
+                const bubbleHalfHeight = Math.max(18, (bubble.offsetHeight || 44) / 2);
+                const minX = offsetLeft + bubbleHalfWidth + 8;
+                const minY = offsetTop + bubbleHalfHeight + 8;
+                return {
+                    viewWidth,
+                    viewHeight,
+                    offsetLeft,
+                    offsetTop,
+                    bubbleHalfWidth,
+                    bubbleHalfHeight,
+                    minX,
+                    maxX: Math.max(minX, offsetLeft + viewWidth - bubbleHalfWidth - 8),
+                    minY,
+                    maxY: Math.max(minY, offsetTop + viewHeight - bubbleHalfHeight - 8)
+                };
+            };
+
+            const clampBubblePosition = (x, y) => {
+                const bounds = getBubbleViewportBounds();
+                return {
+                    x: Math.max(bounds.minX, Math.min(bounds.maxX, x)),
+                    y: Math.max(bounds.minY, Math.min(bounds.maxY, y)),
+                    bounds
+                };
+            };
+
+            const applyBubblePosition = (position) => {
+                bubble.style.left = `${position.x}px`;
+                bubble.style.top = `${position.y}px`;
+            };
+
+            const positionBubble = () => {
+                if (!bubble.isConnected) {
+                    bubblePositionController.abort();
+                    return;
+                }
+                if (manualPosition) {
+                    manualPosition = clampBubblePosition(manualPosition.x, manualPosition.y);
+                    applyBubblePosition(manualPosition);
+                    return;
+                }
+                const bounds = getBubbleViewportBounds();
                 const pickAnchorRect = () => {
-                    const candidates = [
-                        hostDoc.querySelector('#send_form'),
-                        hostDoc.querySelector('#form_sheld'),
-                        hostDoc.querySelector('#send_textarea')?.closest?.('#send_form, #form_sheld, form, .send_form, .chat-input-container'),
-                        hostDoc.querySelector('#send_textarea')
-                    ].filter(Boolean);
-                    let best = null;
-                    for (const el of candidates) {
+                    for (const el of collectBubbleAnchorElements()) {
                         const rect = el.getBoundingClientRect?.();
                         if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-                        if (!best || rect.bottom > best.bottom) {
-                            best = rect;
-                        }
+                        const style = hostWin.getComputedStyle?.(el);
+                        if (style?.display === 'none' || style?.visibility === 'hidden') continue;
+                        return rect;
                     }
-                    return best;
+                    return null;
                 };
                 const anchorRect = pickAnchorRect();
                 const hasAnchor = !!anchorRect;
-                const bubbleHalfWidth = Math.max(18, (bubble.offsetWidth || 44) / 2);
-                const bubbleHalfHeight = Math.max(18, (bubble.offsetHeight || 44) / 2);
 
-                let targetX = offsetLeft + (viewWidth / 2);
-                let targetY = offsetTop + viewHeight - bubbleHalfHeight - 126;
+                let targetX = bounds.offsetLeft + (bounds.viewWidth / 2);
+                let targetY = bounds.offsetTop + bounds.viewHeight - bounds.bubbleHalfHeight - 126;
 
                 if (hasAnchor) {
-                    targetX = offsetLeft + anchorRect.left + (anchorRect.width / 2);
-                    targetY = offsetTop + anchorRect.top - bubbleHalfHeight - 10;
+                    targetX = anchorRect.left + (anchorRect.width / 2);
+                    targetY = anchorRect.top - bounds.bubbleHalfHeight - 10;
                 }
 
-                const minX = offsetLeft + bubbleHalfWidth + 8;
-                const maxX = offsetLeft + viewWidth - bubbleHalfWidth - 8;
-                const minY = offsetTop + bubbleHalfHeight + 8;
-                const maxY = offsetTop + viewHeight - bubbleHalfHeight - 8;
-                targetX = Math.max(minX, Math.min(maxX, targetX));
-                targetY = Math.max(minY, Math.min(maxY, targetY));
-
-                bubble.style.left = `${targetX}px`;
-                bubble.style.top = `${targetY}px`;
+                applyBubblePosition(clampBubblePosition(targetX, targetY));
             };
 
-            hostWin.addEventListener('resize', positionBubble, { passive: true, signal: bubblePositionController.signal });
+            let bubblePositionFrame = null;
+            const bubblePositionTimers = new Set();
+            const clearScheduledBubblePositions = () => {
+                if (bubblePositionFrame !== null && typeof hostWin.cancelAnimationFrame === 'function') {
+                    hostWin.cancelAnimationFrame(bubblePositionFrame);
+                }
+                bubblePositionFrame = null;
+                bubblePositionTimers.forEach(timer => hostWin.clearTimeout(timer));
+                bubblePositionTimers.clear();
+            };
+            const scheduleBubblePosition = () => {
+                if (bubblePositionController.signal.aborted) return;
+                clearScheduledBubblePositions();
+                if (typeof hostWin.requestAnimationFrame === 'function') {
+                    bubblePositionFrame = hostWin.requestAnimationFrame(() => {
+                        bubblePositionFrame = null;
+                        positionBubble();
+                    });
+                } else {
+                    positionBubble();
+                }
+                [60, 160, 320, 600].forEach((delay) => {
+                    const timer = hostWin.setTimeout(() => {
+                        bubblePositionTimers.delete(timer);
+                        positionBubble();
+                    }, delay);
+                    bubblePositionTimers.add(timer);
+                });
+            };
+
+            hostWin.addEventListener('resize', scheduleBubblePosition, { passive: true, signal: bubblePositionController.signal });
             if (hostWin.visualViewport) {
-                hostWin.visualViewport.addEventListener('resize', positionBubble, { passive: true, signal: bubblePositionController.signal });
-                hostWin.visualViewport.addEventListener('scroll', positionBubble, { passive: true, signal: bubblePositionController.signal });
+                hostWin.visualViewport.addEventListener('resize', scheduleBubblePosition, { passive: true, signal: bubblePositionController.signal });
+                hostWin.visualViewport.addEventListener('scroll', scheduleBubblePosition, { passive: true, signal: bubblePositionController.signal });
             }
-            positionBubble();
+            hostDoc.addEventListener('focusin', scheduleBubblePosition, { capture: true, signal: bubblePositionController.signal });
+            hostDoc.addEventListener('focusout', scheduleBubblePosition, { capture: true, signal: bubblePositionController.signal });
+
+            const BubbleResizeObserver = hostWin.ResizeObserver || globalThis.ResizeObserver;
+            const anchorResizeObserver = BubbleResizeObserver
+                ? new BubbleResizeObserver(scheduleBubblePosition)
+                : null;
+            collectBubbleAnchorElements().forEach(element => anchorResizeObserver?.observe(element));
+            bubblePositionController.signal.addEventListener('abort', () => {
+                clearScheduledBubblePositions();
+                anchorResizeObserver?.disconnect();
+                if (suppressBubbleClickTimer !== null) {
+                    hostWin.clearTimeout(suppressBubbleClickTimer);
+                    suppressBubbleClickTimer = null;
+                }
+            }, { once: true });
+            scheduleBubblePosition();
+
+            const getStyledBubbleCenter = () => {
+                const styledLeft = Number.parseFloat(bubble.style.left);
+                const styledTop = Number.parseFloat(bubble.style.top);
+                if (Number.isFinite(styledLeft) && Number.isFinite(styledTop)) {
+                    return { x: styledLeft, y: styledTop };
+                }
+                const rect = bubble.getBoundingClientRect();
+                return {
+                    x: rect.left + (rect.width / 2),
+                    y: rect.top + (rect.height / 2)
+                };
+            };
+
+            const finishBubbleDrag = (event) => {
+                if (dragPointerId === null || event.pointerId !== dragPointerId) return;
+                try {
+                    if (bubble.hasPointerCapture?.(dragPointerId)) {
+                        bubble.releasePointerCapture?.(dragPointerId);
+                    }
+                } catch (e) {}
+                dragPointerId = null;
+                dragStartPoint = null;
+                dragStartPosition = null;
+                bubble.classList.remove('is-dragging');
+                if (didDragBubble) {
+                    suppressNextBubbleClick = true;
+                    if (suppressBubbleClickTimer !== null) hostWin.clearTimeout(suppressBubbleClickTimer);
+                    suppressBubbleClickTimer = hostWin.setTimeout(() => {
+                        suppressNextBubbleClick = false;
+                        suppressBubbleClickTimer = null;
+                    }, 800);
+                    event.preventDefault?.();
+                }
+                didDragBubble = false;
+            };
+
+            bubble.addEventListener('pointerdown', (event) => {
+                if (event.isPrimary === false) return;
+                if (event.pointerType === 'mouse' && event.button !== 0) return;
+                positionBubble();
+                dragPointerId = event.pointerId;
+                dragStartPoint = { x: event.clientX, y: event.clientY };
+                dragStartPosition = getStyledBubbleCenter();
+                didDragBubble = false;
+                try {
+                    bubble.setPointerCapture?.(event.pointerId);
+                } catch (e) {}
+                event.preventDefault?.();
+            }, { signal: bubblePositionController.signal });
+
+            bubble.addEventListener('pointermove', (event) => {
+                if (dragPointerId === null || event.pointerId !== dragPointerId || !dragStartPoint || !dragStartPosition) return;
+                const deltaX = event.clientX - dragStartPoint.x;
+                const deltaY = event.clientY - dragStartPoint.y;
+                if (!didDragBubble && Math.hypot(deltaX, deltaY) < BUBBLE_DRAG_THRESHOLD) return;
+                if (!didDragBubble) {
+                    didDragBubble = true;
+                    bubble.classList.add('is-dragging');
+                }
+                manualPosition = clampBubblePosition(
+                    dragStartPosition.x + deltaX,
+                    dragStartPosition.y + deltaY
+                );
+                applyBubblePosition(manualPosition);
+                event.preventDefault?.();
+            }, { signal: bubblePositionController.signal });
+
+            bubble.addEventListener('pointerup', finishBubbleDrag, { signal: bubblePositionController.signal });
+            bubble.addEventListener('pointercancel', finishBubbleDrag, { signal: bubblePositionController.signal });
 
             // 动画滑入
             setTimeout(() => bubble.classList.add('show'), 40);
@@ -2794,81 +3759,59 @@ if (window.GGP_Loaded) {
             };
             window.VirtualPhone.hideMofoUpdateBubble = hideBubble;
 
-            const burstBubble = () => new Promise((resolve) => {
-                if (!bubble.isConnected) {
-                    resolve();
+            // 3. 点击气泡 -> 打开全屏速览
+            bubble.onclick = () => {
+                if (suppressNextBubbleClick) {
+                    suppressNextBubbleClick = false;
+                    if (suppressBubbleClickTimer !== null) {
+                        hostWin.clearTimeout(suppressBubbleClickTimer);
+                        suppressBubbleClickTimer = null;
+                    }
                     return;
                 }
-                const rect = bubble.getBoundingClientRect();
-                const centerX = rect.left + rect.width / 2;
-                const centerY = rect.top + rect.height / 2;
-                const vectors = [
-                    [-30, -26], [-9, -36], [18, -32], [34, -10],
-                    [28, 22], [4, 36], [-25, 20], [-38, -2]
-                ];
-                vectors.forEach(([x, y], index) => {
-                    const dot = hostDoc.createElement('span');
-                    dot.className = 'mofo-burst-dot';
-                    const size = 3 + (index % 3) * 1.5;
-                    dot.style.width = `${size}px`;
-                    dot.style.height = `${size}px`;
-                    dot.style.left = `${centerX}px`;
-                    dot.style.top = `${centerY}px`;
-                    dot.style.setProperty('--mofo-burst-x', `${x}px`);
-                    dot.style.setProperty('--mofo-burst-y', `${y}px`);
-                    bubbleRoot.appendChild(dot);
-                    setTimeout(() => dot.remove(), 460);
-                });
-                bubble.classList.add('bursting');
-                setTimeout(() => {
-                    hideBubble();
-                    resolve();
-                }, 330);
-            });
-
-            // 3. 点击气泡 -> 打开全屏速览
-            bubble.onclick = async () => {
-                await burstBubble();
-
-                // --- 解析模板与CSS ---
-                const htmlTemplate = String(item.htmlTemplate ?? item.templateHtml ?? item['html模板'] ?? '').trim();
-                let innerHtml = '';
-                if (htmlTemplate && typeof mofoData.renderTemplate === 'function') {
-                    const rendered = mofoData.renderTemplate(htmlTemplate, item.state || {});
-                    innerHtml = sanitizePreviewHtml(rendered);
+                const previewItem = mofoData?.getItemById?.(mofoId) || item;
+                const bubbleHistoryEnabled = previewItem.bubbleHistoryEnabled !== false;
+                const history = bubbleHistoryEnabled ? getMofoBubbleHistory(mofoData, mofoId) : [];
+                if (history.length === 0) {
+                    history.push({
+                        messageIndex: Number.isInteger(previewItem.lastMessageIndex) ? previewItem.lastMessageIndex : null,
+                        payload: String(previewItem.lastPayload || ''),
+                        state: previewItem.state || {}
+                    });
                 }
-                if (!innerHtml.trim()) {
-                    // 兜底渲染（针对没有写HTML模板或模板渲染为空的条目）
-                    const rows = Object.entries(item.state || {}).map(([k, v]) => `
+                let activeHistoryIndex = history.length - 1;
+
+                const htmlTemplate = String(
+                    previewItem.bubbleHtmlTemplate
+                    || previewItem.htmlTemplate
+                    || previewItem.templateHtml
+                    || previewItem['html模板']
+                    || ''
+                ).trim();
+                const renderPreviewState = (state = {}) => {
+                    let innerHtml = '';
+                    if (htmlTemplate && typeof mofoData.renderTemplate === 'function') {
+                        innerHtml = sanitizePreviewHtml(
+                            mofoData.renderTemplate(htmlTemplate, getMofoRuntimeTemplateState(state))
+                        );
+                    }
+                    if (innerHtml.trim()) return innerHtml;
+
+                    const rows = Object.entries(state || {}).map(([k, v]) => `
                         <div style="display:flex; justify-content:space-between; gap:8px; margin-bottom:6px; padding:8px; background:#f5f8ff; border-radius:8px;">
                             <span style="color:#3c5277; font-size:12px;">${escapeHtml(k)}</span>
                             <strong style="color:#1f2f46; font-size:12px;">${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v ?? ''))}</strong>
                         </div>
                     `).join('');
-                    innerHtml = `<div class="mofo-preview-card" style="padding:12px; background:#fff; border-radius:12px;">
-                        <div style="font-size:14px; font-weight:bold; margin-bottom:10px;">${escapeHtml(item.name)}</div>
+                    return `<div class="mofo-preview-card" style="padding:12px; background:#fff; border-radius:12px;">
+                        <div style="font-size:14px; font-weight:bold; margin-bottom:10px;">${escapeHtml(previewItem.name)}</div>
                         ${rows || '<div class="mofo-runtime-empty" style="text-align:center; color:#999; padding:20px;">暂无数据</div>'}
                     </div>`;
-                }
+                };
 
-                // 为了防止 CSS 污染，包裹一个特定的作用域 class
+                // 模板样式只作用于内容区，不影响统一的楼层翻页控件。
                 const scopeClass = 'mofo-global-scope-' + Date.now();
-                const cssTextRaw = String(item.cssText || '').replace(/<\/style/gi, '<\\/style');
-                const cssText = cssTextRaw.replace(/(^|[{}])(\s*[^@{}][^{}]*?)\{/g, (match, p1, p2) => {
-                    const scoped = String(p2 || '')
-                        .split(',')
-                        .map((sel) => {
-                            const selector = String(sel || '').trim();
-                            if (!selector) return '';
-                            if (/^(from|to|\d+%)$/i.test(selector)) return selector;
-                            if (/^(html|body|:root)$/i.test(selector)) return `.${scopeClass}`;
-                            if (selector.startsWith(`.${scopeClass}`)) return selector;
-                            return `.${scopeClass} ${selector}`;
-                        })
-                        .filter(Boolean)
-                        .join(', ');
-                    return scoped ? `${p1}${scoped}{` : match;
-                });
+                const cssText = scopeMofoCss(previewItem.cssText || '', `.${scopeClass}`);
 
                 // --- 创建遮罩层与卡片 ---
                 const oldOverlay = hostDoc.getElementById('mofo-global-preview-overlay');
@@ -2878,10 +3821,31 @@ if (window.GGP_Loaded) {
 
                 const pop = hostDoc.createElement('div');
                 pop.id = 'mofo-global-preview-pop';
-                pop.className = scopeClass;
-                pop.innerHTML = `<style>${cssText}</style>${innerHtml}`;
+                pop.className = 'mofo-global-preview-shell';
+
+                const styleElement = hostDoc.createElement('style');
+                styleElement.textContent = cssText;
+
+                const historyNav = hostDoc.createElement('div');
+                historyNav.className = 'mofo-history-nav';
+                historyNav.innerHTML = `
+                    <button type="button" class="mofo-history-button mofo-history-prev" aria-label="查看上一楼">‹ 上一楼</button>
+                    <span class="mofo-history-count" aria-live="polite"></span>
+                    <button type="button" class="mofo-history-button mofo-history-next" aria-label="查看下一楼">下一楼 ›</button>
+                `;
+
+                const historyContent = hostDoc.createElement('div');
+                historyContent.className = `mofo-history-content ${scopeClass}`;
+
+                pop.appendChild(styleElement);
+                pop.appendChild(historyContent);
+                pop.appendChild(historyNav);
                 overlay.appendChild(pop);
                 (hostDoc.documentElement || hostDoc.body).appendChild(overlay);
+
+                const previousButton = historyNav.querySelector('.mofo-history-prev');
+                const nextButton = historyNav.querySelector('.mofo-history-next');
+                const historyCount = historyNav.querySelector('.mofo-history-count');
 
                 const positionPop = () => {
                     if (!pop.isConnected) return;
@@ -2892,9 +3856,26 @@ if (window.GGP_Loaded) {
                     const offsetTop = vv?.offsetTop || 0;
                     pop.style.left = `${offsetLeft + (viewWidth / 2)}px`;
                     pop.style.top = `${offsetTop + (viewHeight / 2)}px`;
-                    pop.style.maxHeight = `${Math.max(240, viewHeight - 28)}px`;
+                    pop.style.maxWidth = `${Math.min(920, Math.max(240, viewWidth - 28))}px`;
+                    const availableHeight = Math.max(240, Math.min(viewHeight - 28, viewHeight * 0.85));
+                    pop.style.maxHeight = `${availableHeight}px`;
+                    const navHeight = historyNav.hidden ? 0 : (historyNav.offsetHeight + 8);
+                    historyContent.style.maxHeight = `${Math.max(180, availableHeight - navHeight)}px`;
                 };
-                positionPop();
+
+                const renderActiveHistory = () => {
+                    const entry = history[activeHistoryIndex] || history[history.length - 1];
+                    historyContent.innerHTML = renderPreviewState(entry?.state || {});
+                    historyContent.scrollTop = 0;
+                    historyContent.scrollLeft = 0;
+                    previousButton.disabled = activeHistoryIndex <= 0;
+                    nextButton.disabled = activeHistoryIndex >= history.length - 1;
+                    historyNav.hidden = !bubbleHistoryEnabled || history.length <= 1;
+                    historyCount.textContent = Number.isInteger(entry?.messageIndex)
+                        ? `第${entry.messageIndex}楼`
+                        : `第${activeHistoryIndex + 1}楼`;
+                    positionPop();
+                };
 
                 const previewController = new AbortController();
                 hostWin.addEventListener('resize', positionPop, { passive: true, signal: previewController.signal });
@@ -2902,6 +3883,17 @@ if (window.GGP_Loaded) {
                     hostWin.visualViewport.addEventListener('resize', positionPop, { passive: true, signal: previewController.signal });
                     hostWin.visualViewport.addEventListener('scroll', positionPop, { passive: true, signal: previewController.signal });
                 }
+                previousButton.addEventListener('click', () => {
+                    if (activeHistoryIndex <= 0) return;
+                    activeHistoryIndex -= 1;
+                    renderActiveHistory();
+                }, { signal: previewController.signal });
+                nextButton.addEventListener('click', () => {
+                    if (activeHistoryIndex >= history.length - 1) return;
+                    activeHistoryIndex += 1;
+                    renderActiveHistory();
+                }, { signal: previewController.signal });
+                renderActiveHistory();
 
                 // 淡入
                 setTimeout(() => { overlay.style.opacity = '1'; }, 10);
@@ -3225,6 +4217,45 @@ if (window.GGP_Loaded) {
                 }
                 .inline-reply-page::-webkit-scrollbar { width: 0; height: 0; display: none; }
                 .inline-reply-page.is-active { display: block; }
+                #phone-inline-reply-menu-pop .inline-reply-page[data-tab-page="mofo"] {
+                    overflow: hidden;
+                }
+                #phone-inline-reply-menu-pop #mofo-page-root {
+                    height: 100%;
+                    min-height: 0;
+                }
+                #phone-inline-reply-menu-pop .mofo-page-layout {
+                    display: flex;
+                    flex-direction: column;
+                    height: 100%;
+                    min-height: 0;
+                }
+                #phone-inline-reply-menu-pop .mofo-page-fixed-head {
+                    flex: 0 0 auto;
+                    position: relative;
+                    z-index: 3;
+                    margin-bottom: 6px;
+                    padding-top: 4px;
+                    background: linear-gradient(180deg, rgba(235,242,252,0.98), rgba(235,242,252,0.9));
+                    backdrop-filter: blur(12px);
+                    -webkit-backdrop-filter: blur(12px);
+                }
+                #phone-inline-reply-menu-pop .mofo-page-scroll-body {
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    overflow-y: auto;
+                    overflow-x: hidden;
+                    scrollbar-width: none;
+                    -ms-overflow-style: none;
+                    touch-action: pan-y !important;
+                    overscroll-behavior-y: contain;
+                    padding-bottom: 2px;
+                }
+                #phone-inline-reply-menu-pop .mofo-page-scroll-body::-webkit-scrollbar {
+                    width: 0;
+                    height: 0;
+                    display: none;
+                }
                 .inline-reply-section-title {
                     font-size: 12px;
                     color: #6b7894;
@@ -3547,7 +4578,7 @@ if (window.GGP_Loaded) {
         const inject = () => {
             if (!storage) return;
             const isEnabled = storage.get('phone_inline_reply_btn') !== false;
-            const existingBtn = document.getElementById(btnId);
+            let existingBtn = document.getElementById(btnId);
             const hasQrAssistantApi = registerQrAssistantButton();
             if (hasQrAssistantApi) {
                 ensureQrManagedHideStyle();
@@ -3556,13 +4587,21 @@ if (window.GGP_Loaded) {
                 document.getElementById(qrScriptContainerId)?.classList?.remove?.('st-phone-inline-reply-qr-managed');
                 document.getElementById(legacyWrapperId)?.classList?.remove?.('st-phone-inline-reply-qr-managed');
             }
-            const existingWrapper =
+            let existingWrapper =
                 document.getElementById(qrScriptContainerId) ||
                 document.getElementById(legacyWrapperId) ||
                 existingBtn?.closest('.st-phone-inline-reply-wrapper');
             const isQrAssistantEnabled = !!document.body?.classList?.contains('qra-enabled');
             const { stContext, qrSettings } = getQrAssistantContext();
             const shouldHideInlineReplyForQr = hasQrAssistantApi && !isInlineReplyWhitelistedByQr(qrSettings);
+
+            // 热更新兼容：旧按钮只有 click 逻辑时重建一次，避免必须整页刷新才获得移动端修复。
+            if (existingBtn && existingBtn.dataset.stPhoneMobileTouchBound !== 'true') {
+                existingWrapper?.remove();
+                existingBtn.remove();
+                existingBtn = null;
+                existingWrapper = null;
+            }
 
             if (!hasQrAssistantApi && qrSettings) {
                 ensureQrWhitelistInitialized(qrSettings, stContext);
@@ -3649,13 +4688,14 @@ if (window.GGP_Loaded) {
             const btn = document.createElement('div');
             btn.id = btnId;
             btn.className = 'remote-ctrl-btn qr--button menu_button interactable';
+            btn.dataset.stPhoneMobileTouchBound = 'true';
             btn.title = '快捷回复联系人 (手机插件)';
             btn.innerHTML = '<div class="qr--button-label"><i class="fa-solid fa-mobile-screen-button"></i></div>';
 
             // 🔥 防抖锁，防止多端触发两次
             let isMenuOpen = false;
 
-            // 🛡️ 核心修复：完全照抄小铅笔，使用 mouseup 和 touchend 绕过酒馆拦截
+            // 🛡️ 统一入口动作；移动端由 touchend 直接调用，桌面端继续走 click
             const handleAction = async (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -3766,58 +4806,12 @@ if (window.GGP_Loaded) {
                             .replace(/\son[a-z]+\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, '')
                             .replace(/\s(href|src)\s*=\s*(['"])\s*javascript:[\s\S]*?\2/gi, ' $1="#"');
                     };
-                    const normalizeTemplateExprPath = (expr = '') => {
-                        return String(expr ?? '')
-                            .trim()
-                            .replace(/\[(\d+)\]/g, '.$1')
-                            .replace(/\[['"]([^'"[\]]+)['"]\]/g, '.$1')
-                            .replace(/^\.+|\.+$/g, '');
-                    };
-                    const resolveTemplateExpr = (stateObj, expr = '') => {
-                        const path = normalizeTemplateExprPath(expr);
-                        if (!path) return { exists: false, value: '' };
-                        const segments = path.split('.').map(seg => seg.trim()).filter(Boolean);
-                        if (segments.length === 0) return { exists: false, value: '' };
-                        let current = stateObj;
-                        for (const seg of segments) {
-                            if (current === null || typeof current === 'undefined') {
-                                return { exists: false, value: '' };
-                            }
-                            if (Array.isArray(current)) {
-                                if (!/^\d+$/.test(seg)) return { exists: false, value: '' };
-                                const index = Number(seg);
-                                if (index < 0 || index >= current.length) return { exists: false, value: '' };
-                                current = current[index];
-                                continue;
-                            }
-                            if (typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, seg)) {
-                                current = current[seg];
-                                continue;
-                            }
-                            return { exists: false, value: '' };
-                        }
-                        if (typeof current === 'undefined') return { exists: false, value: '' };
-                        return { exists: true, value: current };
-                    };
-                    const extractTemplateExprList = (template = '') => {
-                        const text = String(template || '');
-                        if (!text) return [];
-                        const unique = new Set();
-                        const regex = /\{\{\s*([^{}]+?)\s*\}\}/g;
-                        let match = regex.exec(text);
-                        while (match) {
-                            const expr = String(match[1] || '').trim();
-                            if (expr) unique.add(expr);
-                            match = regex.exec(text);
-                        }
-                        return Array.from(unique);
-                    };
                     const renderMofoTemplatePreview = (template, stateObj = {}) => {
                         const rawTemplate = String(template ?? '').trim();
                         if (!rawTemplate) return { ok: false, html: '' };
                         const safeState = (stateObj && typeof stateObj === 'object' && !Array.isArray(stateObj))
-                            ? stateObj
-                            : {};
+                            ? getMofoRuntimeTemplateState(stateObj)
+                            : getMofoRuntimeTemplateState({});
                         const rendered = (typeof mofoData?.renderTemplate === 'function')
                             ? mofoData.renderTemplate(rawTemplate, safeState)
                             : rawTemplate;
@@ -3909,7 +4903,7 @@ if (window.GGP_Loaded) {
                                         </label>
                                         <label class="mofo-entry-toggle" title="启用线下提示词注入">
                                         <input type="checkbox" class="mofo-offline-toggle" data-mofo-id="${escapeHtml(item.id)}" ${item.offlinePromptEnabled === false ? '' : 'checked'}>
-                                        <span>线下</span>
+                                        <span>启用</span>
                                     </label>
                                     </div>
                                 </div>
@@ -3923,25 +4917,31 @@ if (window.GGP_Loaded) {
                     };
 
                     const buildMofoPageHtml = () => `
-                        <div class="inline-reply-section-title">魔坊列表</div>
-                        <div class="mofo-toolbar">
-                            <button class="mofo-toolbar-btn" id="mofo-create-btn">新建</button>
-                            <button class="mofo-toolbar-btn" id="mofo-refresh-btn">刷新</button>
+                        <div class="mofo-page-layout">
+                            <div class="inline-reply-section-title mofo-page-fixed-head">魔坊列表</div>
+                            <div class="mofo-page-scroll-body">
+                                <div class="mofo-toolbar">
+                                    <button class="mofo-toolbar-btn" id="mofo-create-btn">新建</button>
+                                    <button class="mofo-toolbar-btn" id="mofo-refresh-btn">刷新</button>
+                                </div>
+                                <div id="mofo-list-wrap">${buildMofoListHtml()}</div>
+                            </div>
                         </div>
-                        <div id="mofo-list-wrap">${buildMofoListHtml()}</div>
                     `;
 
                     const buildMofoDetailHtml = (current) => {
                         if (!current) {
                             return `
-                                <div id="mofo-detail-page">
-                                    <div class="inline-reply-section-title" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                <div id="mofo-detail-page" class="mofo-page-layout">
+                                    <div class="inline-reply-section-title mofo-page-fixed-head" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
                                         <button type="button" id="mofo-detail-back-btn" style="border:1px solid rgba(116, 139, 184, 0.55); border-radius:7px; background:rgba(255,255,255,0.34); color:#264672; font-size:11px; padding:4px 8px; cursor:pointer;">← 返回</button>
                                         <span>魔坊详情</span>
                                         <span style="width:52px;"></span>
                                     </div>
-                                    <div style="font-size:11px; color:#5d78a4; border-radius:10px; padding:10px; border:1px dashed rgba(116,139,184,0.55); background:rgba(255,255,255,0.24);">
-                                        条目不存在或已删除。
+                                    <div class="mofo-page-scroll-body">
+                                        <div style="font-size:11px; color:#5d78a4; border-radius:10px; padding:10px; border:1px dashed rgba(116,139,184,0.55); background:rgba(255,255,255,0.24);">
+                                            条目不存在或已删除。
+                                        </div>
                                     </div>
                                 </div>
                             `;
@@ -3974,26 +4974,28 @@ if (window.GGP_Loaded) {
 
                         return `
                             <style>${safeCss}</style>
-                            <div id="mofo-detail-page" data-mofo-scope="${escapeHtml(scopeToken)}">
-                                <div class="inline-reply-section-title" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                            <div id="mofo-detail-page" class="mofo-page-layout" data-mofo-scope="${escapeHtml(scopeToken)}">
+                                <div class="inline-reply-section-title mofo-page-fixed-head" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
                                     <button type="button" id="mofo-detail-back-btn" style="border:1px solid rgba(116, 139, 184, 0.55); border-radius:7px; background:rgba(255,255,255,0.34); color:#264672; font-size:11px; padding:4px 8px; cursor:pointer;">← 返回</button>
                                     <span>${escapeHtml(current.name || '魔坊详情')}</span>
                                     <span style="width:52px;"></span>
                                 </div>
-                                <div class="mofo-preview-wrap">
-                                    <div class="mofo-preview-head">
-                                        <span class="mofo-preview-title">${escapeHtml(current.name || '未命名')}</span>
-                                        <span class="mofo-preview-tag">&lt;${escapeHtml(current.tagName || '')}&gt;</span>
-                                    </div>
-                                    <div style="font-size:10px; color:${current.offlinePromptEnabled === false ? '#9a6a76' : '#2f6a54'}; margin-bottom:6px;">
-                                        线下提示词注入：${current.offlinePromptEnabled === false ? '未启用' : '已启用'}
-                                    </div>
-                                    ${previewBody}
-                                    <div style="margin-top:7px; font-size:10px; color:#5876a4; line-height:1.5; white-space:pre-wrap; max-height:100px; overflow:auto;">${escapeHtml(current.promptTemplate || '未设置提示词模板')}</div>
-                                    <div style="display:flex; gap:6px; margin-top:8px;">
-                                        <button type="button" id="mofo-detail-edit-btn" style="flex:1; border:1px solid rgba(116, 139, 184, 0.55); border-radius:8px; background:rgba(255,255,255,0.35); color:#284a76; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">编辑</button>
-                                        <button type="button" id="mofo-detail-clear-session-btn" style="flex:1; border:1px solid rgba(83, 128, 201, 0.6); border-radius:8px; background:rgba(255,255,255,0.35); color:#2c5da8; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">清理本会话</button>
-                                        <button type="button" id="mofo-detail-delete-global-btn" style="flex:1; border:1px solid rgba(188, 92, 117, 0.7); border-radius:8px; background:rgba(255,255,255,0.35); color:#a33c57; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">全局删除</button>
+                                <div class="mofo-page-scroll-body">
+                                    <div class="mofo-preview-wrap">
+                                        <div class="mofo-preview-head">
+                                            <span class="mofo-preview-title">${escapeHtml(current.name || '未命名')}</span>
+                                            <span class="mofo-preview-tag">&lt;${escapeHtml(current.tagName || '')}&gt;</span>
+                                        </div>
+                                        <div style="font-size:10px; color:${current.offlinePromptEnabled === false ? '#9a6a76' : '#2f6a54'}; margin-bottom:6px;">
+                                            线下提示词注入：${current.offlinePromptEnabled === false ? '未启用' : '已启用'}
+                                        </div>
+                                        ${previewBody}
+                                        <div style="margin-top:7px; font-size:10px; color:#5876a4; line-height:1.5; white-space:pre-wrap; max-height:100px; overflow:auto;">${escapeHtml(current.promptTemplate || '未设置提示词模板')}</div>
+                                        <div style="display:flex; gap:6px; margin-top:8px;">
+                                            <button type="button" id="mofo-detail-edit-btn" style="flex:1; border:1px solid rgba(116, 139, 184, 0.55); border-radius:8px; background:rgba(255,255,255,0.35); color:#284a76; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">编辑</button>
+                                            <button type="button" id="mofo-detail-clear-session-btn" style="flex:1; border:1px solid rgba(83, 128, 201, 0.6); border-radius:8px; background:rgba(255,255,255,0.35); color:#2c5da8; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">清理本会话</button>
+                                            <button type="button" id="mofo-detail-delete-global-btn" style="flex:1; border:1px solid rgba(188, 92, 117, 0.7); border-radius:8px; background:rgba(255,255,255,0.35); color:#a33c57; font-size:11px; padding:6px 8px; cursor:pointer; font-weight:700;">全局删除</button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -4003,10 +5005,11 @@ if (window.GGP_Loaded) {
                     const buildMofoEditorHtml = (current = null) => {
                         const oldName = String(current?.name || '').trim();
                         const oldTag = String(current?.tagName || current?.name || '').trim();
+                        const oldInlineRenderEnabled = current?.inlineRenderEnabled === true;
                         const oldCss = String(current?.cssText || '');
                         const oldHtmlTemplate = String(current?.htmlTemplate ?? current?.templateHtml ?? current?.['html模板'] ?? '');
+                        const oldBeautifyTemplate = combineMofoBeautifyTemplate(oldHtmlTemplate, oldCss);
                         const oldPrompt = String(current?.promptTemplate || '');
-                        const oldOfflinePromptEnabled = current?.offlinePromptEnabled !== false;
                         const oldInitial = (() => {
                             try {
                                 const source = current?.initialState;
@@ -4019,12 +5022,13 @@ if (window.GGP_Loaded) {
                         const saveText = current ? '保存' : '创建';
 
                         return `
-                            <div class="inline-reply-section-title" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
-                                <button type="button" class="mofo-editor-back-btn" style="border:1px solid rgba(116, 139, 184, 0.55); border-radius:7px; background:rgba(255,255,255,0.34); color:#264672; font-size:11px; padding:4px 8px; cursor:pointer;">← 返回</button>
-                                <span>${escapeHtml(title)}</span>
-                                <span style="width:52px;"></span>
-                            </div>
-                            <div class="mofo-editor-inline" style="display:grid; gap:7px; min-height:0;">
+                            <div class="mofo-page-layout">
+                                <div class="inline-reply-section-title mofo-page-fixed-head" style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                    <button type="button" class="mofo-editor-back-btn" style="border:1px solid rgba(116, 139, 184, 0.55); border-radius:7px; background:rgba(255,255,255,0.34); color:#264672; font-size:11px; padding:4px 8px; cursor:pointer;">← 返回</button>
+                                    <span>${escapeHtml(title)}</span>
+                                    <span style="width:52px;"></span>
+                                </div>
+                                <div class="mofo-page-scroll-body mofo-editor-inline" style="display:grid; gap:7px; min-height:0;">
                                 <label style="display:grid; gap:4px;">
                                     <span style="font-size:11px; color:#4d638a; font-weight:600;">名称</span>
                                     <input type="text" id="mofo-editor-name" maxlength="40" value="${escapeHtml(oldName)}" placeholder="输入魔坊名称" style="height:32px; border:1px solid #d7e2f4; border-radius:8px; padding:0 8px; font-size:12px; outline:none; color:#213454; background:#fbfdff;">
@@ -4033,29 +5037,26 @@ if (window.GGP_Loaded) {
                                     <span style="font-size:11px; color:#4d638a; font-weight:600;">标签</span>
                                     <input type="text" id="mofo-editor-tag" maxlength="40" value="${escapeHtml(oldTag)}" placeholder="对应 <标签></标签>" style="height:32px; border:1px solid #d7e2f4; border-radius:8px; padding:0 8px; font-size:12px; outline:none; color:#213454; background:#fbfdff;">
                                 </label>
-                                <label style="display:grid; gap:4px;">
-                                    <span style="font-size:11px; color:#4d638a; font-weight:600;">CSS</span>
-                                    <textarea id="mofo-editor-css" placeholder="输入用于展示卡片的样式（可留空）" style="min-height:60px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldCss)}</textarea>
+                                <label style="display:grid; gap:4px; border:1px solid #d7e2f4; border-radius:9px; padding:8px; background:rgba(248,251,255,0.72);">
+                                    <span style="font-size:11px; color:#35527f; font-weight:700;">美化模板（HTML + CSS）</span>
+                                    <textarea id="mofo-editor-beautify-template" placeholder="CSS 写在 <style>...</style> 中，下面填写 HTML 模板" style="min-height:190px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldBeautifyTemplate)}</textarea>
                                 </label>
-                                <label style="display:grid; gap:4px;">
-                                    <span style="font-size:11px; color:#4d638a; font-weight:600;">HTML 模板</span>
-                                    <textarea id="mofo-editor-html-template" placeholder="可使用 {{key}} / {{a.b}} 变量；留空则按键值对显示" style="min-height:82px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldHtmlTemplate)}</textarea>
-                                </label>
-                                <label style="display:grid; gap:4px;">
-                                    <span style="font-size:11px; color:#4d638a; font-weight:600;">初始值</span>
-                                    <textarea id="mofo-editor-initial" placeholder="支持 JSON 或 key:value 多行" style="min-height:60px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldInitial)}</textarea>
-                                </label>
+                                <details class="mofo-editor-default-data" ${oldInitial ? 'open' : ''} style="border:1px solid #d7e2f4; border-radius:8px; background:#f6f9ff; padding:7px 9px;">
+                                    <summary style="font-size:11px; color:#4d638a; font-weight:600; cursor:pointer; user-select:none;">默认数据（可选）</summary>
+                                    <textarea id="mofo-editor-initial" placeholder="仅在模板需要默认内容时填写" style="width:100%; box-sizing:border-box; min-height:72px; margin-top:7px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldInitial)}</textarea>
+                                </details>
                                 <label style="display:grid; gap:4px;">
                                     <span style="font-size:11px; color:#4d638a; font-weight:600;">提示词模板</span>
                                     <textarea id="mofo-editor-prompt" placeholder="建议约束 AI 只输出对应标签内容" style="min-height:72px; border:1px solid #d7e2f4; border-radius:8px; padding:8px; font-size:11px; line-height:1.45; outline:none; resize:vertical; color:#213454; background:#fbfdff;">${escapeHtml(oldPrompt)}</textarea>
                                 </label>
                                 <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:#35527f; background:#f6f9ff; border:1px solid #dbe5f7; border-radius:8px; padding:8px 10px;">
-                                    <input type="checkbox" id="mofo-editor-offline-enabled" ${oldOfflinePromptEnabled ? 'checked' : ''} style="accent-color:#4f7fd5;">
-                                    <span>启用该条目线下提示词注入（{{MOFO_PROMPT}}）</span>
+                                    <input type="checkbox" id="mofo-editor-inline-enabled" ${oldInlineRenderEnabled ? 'checked' : ''} style="accent-color:#4f7fd5;">
+                                    <span>在酒馆正文中显示</span>
                                 </label>
                                 <div style="display:flex; gap:6px; padding-top:2px;">
                                     <button type="button" id="mofo-editor-cancel-btn" style="flex:1; border:1px solid rgba(116, 139, 184, 0.55); border-radius:8px; background:rgba(255,255,255,0.34); color:#264672; font-size:11px; padding:7px 8px; cursor:pointer; font-weight:700;">返回</button>
                                     <button type="button" id="mofo-editor-save-btn" style="flex:1; border:1px solid rgba(89, 121, 187, 0.75); border-radius:8px; background:rgba(146, 178, 238, 0.35); color:#1d3f6b; font-size:11px; padding:7px 8px; cursor:pointer; font-weight:700;">${escapeHtml(saveText)}</button>
+                                </div>
                                 </div>
                             </div>
                         `;
@@ -4414,20 +5415,22 @@ if (window.GGP_Loaded) {
                     const readMofoEditorDraft = () => {
                         const nameInput = menu.querySelector('#mofo-editor-name');
                         const tagInput = menu.querySelector('#mofo-editor-tag');
-                        const cssInput = menu.querySelector('#mofo-editor-css');
-                        const htmlTemplateInput = menu.querySelector('#mofo-editor-html-template');
+                        const beautifyInput = menu.querySelector('#mofo-editor-beautify-template');
                         const initialInput = menu.querySelector('#mofo-editor-initial');
                         const promptInput = menu.querySelector('#mofo-editor-prompt');
-                        const offlineEnabledInput = menu.querySelector('#mofo-editor-offline-enabled');
+                        const inlineEnabledInput = menu.querySelector('#mofo-editor-inline-enabled');
+                        const beautifyTemplate = splitMofoBeautifyTemplate(beautifyInput?.value || '');
+                        const inlineRenderEnabled = !!inlineEnabledInput?.checked;
 
                         return {
                             name: String(nameInput?.value || '').trim(),
                             tagName: String(tagInput?.value || '').trim(),
-                            cssText: String(cssInput?.value || ''),
-                            htmlTemplate: String(htmlTemplateInput?.value || ''),
+                            cssText: beautifyTemplate.cssText,
+                            htmlTemplate: beautifyTemplate.htmlTemplate,
                             initialStateRaw: String(initialInput?.value || ''),
                             promptTemplate: String(promptInput?.value || ''),
-                            offlinePromptEnabled: !!offlineEnabledInput?.checked
+                            inlineRenderEnabled,
+                            bubbleRenderEnabled: !inlineRenderEnabled
                         };
                     };
                     const getCanonicalJson = (value) => {
@@ -4470,13 +5473,6 @@ if (window.GGP_Loaded) {
                         }
                         const currentTemplate = String(currentItem.htmlTemplate ?? currentItem.templateHtml ?? currentItem['html模板'] ?? '');
                         return currentTemplate !== String(draft.htmlTemplate ?? '');
-                    };
-
-                    const focusMofoEditorName = () => {
-                        const nameInput = menu.querySelector('#mofo-editor-name');
-                        if (!nameInput) return;
-                        nameInput.focus();
-                        nameInput.setSelectionRange?.(nameInput.value.length, nameInput.value.length);
                     };
 
                     const renderMofoPane = () => {
@@ -4601,6 +5597,7 @@ if (window.GGP_Loaded) {
                                 const ok = confirm(`全局删除魔坊「${current.name}」？\n会删除条目定义，并清理各会话里的对应运行态数据。`);
                                 if (!ok) return;
                                 mofoData.removeItem(current.id);
+                                refreshMofoInlineMessages();
                                 rerenderMofoPane({ keepEditor: false });
                             });
                             return;
@@ -4650,12 +5647,14 @@ if (window.GGP_Loaded) {
                                         mofoEditingId = '';
                                         mofoEditorReturnMode = 'list';
                                     }
+                                    refreshMofoInlineMessages();
+                                    syncMofoBubbleFromLatestMessage()
+                                        .catch(e => console.warn('Mofo bubble mode sync error:', e));
                                     rerenderMofoPane({ keepEditor: true });
                                 } catch (err) {
                                     alert(err?.message || '保存失败');
                                 }
                             });
-                            focusMofoEditorName();
                             return;
                         }
 
@@ -4735,6 +5734,7 @@ if (window.GGP_Loaded) {
                                     const ok = confirm(`全局删除魔坊「${current.name}」？\n会删除条目定义，并清理各会话里的对应运行态数据。`);
                                     if (!ok) return;
                                     mofoData.removeItem(id);
+                                    refreshMofoInlineMessages();
                                     rerenderMofoPane();
                                     return;
                                 }
@@ -4784,11 +5784,23 @@ if (window.GGP_Loaded) {
                 }
             };
 
-            // 🔥 核心修复1：酒馆底栏有滑动拦截，统一使用 click，并阻止 touchstart 被滑动组件劫持
+            // 输入框聚焦时，普通 click 会等键盘收起和 QR 折叠后才触发，首击可能丢失。
+            // touchstart 阶段阻止默认失焦，touchend 直接执行；300ms 防抖会拦住 WebView 补发的 click。
+            let inlineReplyTouchStarted = false;
             btn.addEventListener('click', handleAction);
             btn.addEventListener('touchstart', (e) => {
-                e.stopPropagation(); // 阻止事件冒泡给酒馆的横向滑动条
+                inlineReplyTouchStarted = true;
+                e.preventDefault();
+                e.stopPropagation();
             }, { passive: false });
+            btn.addEventListener('touchend', (e) => {
+                if (!inlineReplyTouchStarted) return;
+                inlineReplyTouchStarted = false;
+                handleAction(e);
+            }, { passive: false });
+            btn.addEventListener('touchcancel', () => {
+                inlineReplyTouchStarted = false;
+            });
 
             let wrapper = document.createElement('div');
             wrapper.id = qrScriptContainerId;
@@ -5031,7 +6043,7 @@ if (window.GGP_Loaded) {
                 baseUrl: ST_PHONE_BASE_URL,
                 onActivate: activatePhoneFromFloatingEntry,
                 onDoubleActivate: activateStoryImageBrowserFromFloatingEntry,
-                onPressStart: () => blurExternalEditableBeforePhoneOpen(document.getElementById('phone-panel')),
+                onBeforeActivate: () => blurExternalEditableBeforePhoneOpen(document.getElementById('phone-panel')),
                 isPanelOpen: () => document.getElementById('phone-panel')?.classList?.contains('phone-panel-open') === true
             });
         }
@@ -5057,6 +6069,7 @@ if (window.GGP_Loaded) {
 
         if (isOpen) {
             // 关闭
+            stopPhonePanelViewportWatchdog();
             panel.classList.remove('phone-panel-open');
             panel.classList.remove('phone-keyboard-open');
             panel.classList.add('phone-panel-hidden');
@@ -5101,14 +6114,16 @@ if (window.GGP_Loaded) {
         if (!panel || !icon) return;
 
         blurExternalEditableBeforePhoneOpen(panel);
-        updatePhonePanelViewportHeight({ force: true });
-        applyPhonePanelDesktopPosition();
         bindPhonePanelDesktopDockDrag(panel);
         panel.classList.add('phone-panel-open');
         panel.classList.remove('phone-panel-hidden');
         panel.style.cssText = '';
         panel.classList.add('drawer-content', 'fillRight', 'openDrawer');
+        updatePhonePanelViewportHeight({ force: true });
+        // Measure only after the hidden rules are gone; display:none reports a zero-sized phone body.
+        applyPhonePanelDesktopPosition();
         schedulePhonePanelViewportUpdate();
+        startPhonePanelViewportWatchdog(1200);
 
         // 自动唤起来电/转线上时也必须补上外部点击关闭监听
         panel.removeEventListener('click', handlePanelClick);
@@ -7291,7 +8306,7 @@ if (window.GGP_Loaded) {
         const conversationId = getCurrentTavernConversationIdentity(context);
 
         // 导入 WechatData（使用单例模式，确保消息被存储）
-        import('./apps/wechat/wechat-data.js?v=20261007-voice-pool').then(module => {
+        import('./apps/wechat/wechat-data.js?v=20261018-integration').then(module => {
             let wechatData;
 
             if (getCurrentTavernConversationIdentity() !== conversationId) {
@@ -7908,26 +8923,340 @@ if (window.GGP_Loaded) {
         updateNotificationBadge(totalNotifications);
     }
 
+    let paymentReceiptNotchObserver = null;
+
+    function updatePaymentReceiptNotches(receipt) {
+        if (!receipt?.isConnected) return;
+        const brand = receipt.querySelector('.st-phone-payment-receipt-brand');
+        const footer = receipt.querySelector('.st-phone-payment-receipt-footer');
+        if (!brand || !footer) return;
+
+        const receiptRect = receipt.getBoundingClientRect();
+        if (receiptRect.width <= 0 || receiptRect.height <= 0) return;
+        const topY = brand.getBoundingClientRect().bottom - receiptRect.top;
+        const bottomY = footer.getBoundingClientRect().top - receiptRect.top;
+        const clampY = value => Math.max(9, Math.min(receiptRect.height - 9, value));
+        receipt.style.setProperty('--st-phone-payment-receipt-notch-top-y', `${clampY(topY).toFixed(2)}px`);
+        receipt.style.setProperty('--st-phone-payment-receipt-notch-bottom-y', `${clampY(bottomY).toFixed(2)}px`);
+    }
+
+    function bindPaymentReceiptNotches(receipt) {
+        if (!receipt) return;
+        updatePaymentReceiptNotches(receipt);
+
+        if (receipt.dataset.paymentReceiptNotchesBound === 'true') return;
+        receipt.dataset.paymentReceiptNotchesBound = 'true';
+        const update = () => updatePaymentReceiptNotches(receipt);
+        const image = receipt.querySelector('.st-phone-payment-receipt-brand-image');
+        image?.addEventListener('load', update);
+        requestAnimationFrame(update);
+        document.fonts?.ready?.then(update).catch(() => {});
+
+        if (typeof ResizeObserver === 'function') {
+            paymentReceiptNotchObserver ||= new ResizeObserver(entries => {
+                entries.forEach(entry => updatePaymentReceiptNotches(entry.target));
+            });
+            paymentReceiptNotchObserver.observe(receipt);
+        }
+    }
+
+    const PHONE_STATEFUL_MESSAGE_SELECTOR = [
+        'iframe',
+        'object',
+        'embed',
+        'script',
+        'style',
+        'form',
+        'input',
+        'textarea',
+        'select',
+        'button',
+        'pre code',
+        '[contenteditable="true"]',
+        '[contenteditable="plaintext-only"]'
+    ].join(',');
+    const PHONE_PROTOCOL_TEXT_SKIP_SELECTOR = [
+        'script',
+        'style',
+        'textarea',
+        'option',
+        'pre',
+        'code',
+        'iframe',
+        'object',
+        'embed',
+        '.st-phone-payment-receipt'
+    ].join(',');
+    const PHONE_RAW_PROTOCOL_BOUNDARY_REGEX = /(?:(?:<|＜|&lt;)\s*\/?\s*(?:wechat|music|phone|weibo|短信|任务进度|线上支付)(?=[\s/>＞]|&gt;)[^>＞]*?(?:>|＞|&gt;))|\[\s*手机来电通话\s*\]|PHONE_CHAT_MODE/i;
+    const PHONE_PROTOCOL_SUFFIX_TEXT_REGEX = /(?:<|＜)\s*\/?\s*(?:wechat|music|phone|weibo|短信|任务进度|线上支付)(?=[\s/>＞])[^>＞]*(?:>|＞)|\[\s*手机来电通话\s*\]|PHONE_CHAT_MODE/i;
+    function shouldPreservePhoneMessageDom(root) {
+        return !!root?.querySelector?.(PHONE_STATEFUL_MESSAGE_SELECTOR);
+    }
+
+    function removePhoneProtocolSuffixPreservingDom(root) {
+        if (!root || typeof document.createTreeWalker !== 'function' || typeof document.createRange !== 'function') {
+            return false;
+        }
+
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let textNode = walker.nextNode();
+        while (textNode) {
+            const parent = textNode.parentElement;
+            if (!parent?.closest?.(PHONE_PROTOCOL_TEXT_SKIP_SELECTOR)) {
+                const match = PHONE_PROTOCOL_SUFFIX_TEXT_REGEX.exec(String(textNode.nodeValue || ''));
+                if (match) {
+                    const range = document.createRange();
+                    range.setStart(textNode, match.index);
+                    range.setEnd(root, root.childNodes.length);
+                    range.deleteContents();
+                    range.detach?.();
+
+                    while (root.lastElementChild) {
+                        const last = root.lastElementChild;
+                        if (last.matches(PHONE_STATEFUL_MESSAGE_SELECTOR)
+                            || last.querySelector(PHONE_STATEFUL_MESSAGE_SELECTOR)
+                            || last.querySelector('img, video, audio, canvas, svg, .st-phone-payment-receipt')
+                            || String(last.textContent || '').trim()) {
+                            break;
+                        }
+                        last.remove();
+                    }
+                    return true;
+                }
+            }
+            textNode = walker.nextNode();
+        }
+        return false;
+    }
+
+    const PHONE_PAYMENT_TEXT_BOUNDARY_REGEX = /(?:<|＜)\s*(\/?)\s*线上支付\s*(?:>|＞)/gi;
+    const PHONE_PAYMENT_RAW_BOUNDARY_REGEX = /(?:<|＜|&lt;)\s*\/?\s*线上支付\s*(?:>|＞|&gt;)/i;
+    const PHONE_PAYMENT_FOREIGN_CONTENT_SELECTOR = [
+        '线上支付',
+        'wechat',
+        'music',
+        'phone',
+        'weibo',
+        '短信',
+        '任务进度',
+        'current_event',
+        'progress',
+        'status_block',
+        'updatevariable',
+        'statusplaceholderimpl'
+    ].join(',');
+
+    function getPhoneMessageRawText(root) {
+        const messageId = Number.parseInt(root?.closest?.('.mes')?.getAttribute?.('mesid') || '', 10);
+        if (!Number.isInteger(messageId) || messageId < 0) return '';
+
+        const context = getContext();
+        const message = Array.isArray(context?.chat) ? context.chat[messageId] : null;
+        return String(message?.extra?.display_text || message?.mes || '');
+    }
+
+    function createPaymentReceiptElement(payment, renderOptions = {}) {
+        const template = document.createElement('template');
+        template.innerHTML = renderOfflineWechatPaymentReceipt(payment, renderOptions);
+        return template.content.querySelector('.st-phone-payment-receipt');
+    }
+
+    function replaceCompletePaymentReceiptsInPlace(root, rawPayments = [], renderOptions = {}) {
+        if (!root || typeof document.createTreeWalker !== 'function' || typeof document.createRange !== 'function') {
+            return { found: false, replaced: 0 };
+        }
+
+        const markerElements = Array.from(root.querySelectorAll?.('[data-st-phone-payment-boundary]') || []);
+        const markerPairs = [];
+        let markerOpener = null;
+        markerElements.forEach((element) => {
+            const boundaryType = String(element.dataset?.stPhonePaymentBoundary || '').trim().toLowerCase();
+            if (boundaryType === 'start') {
+                markerOpener = element;
+                return;
+            }
+            if (boundaryType === 'end' && markerOpener) {
+                markerPairs.push({ opener: markerOpener, closer: element });
+                markerOpener = null;
+            }
+        });
+
+        const paymentElements = Array.from(root.getElementsByTagName?.('线上支付') || []);
+        const boundaries = [];
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT
+        );
+        let node = walker.nextNode();
+        while (node) {
+            const parent = node.parentElement;
+            if (!parent?.closest?.(PHONE_PROTOCOL_TEXT_SKIP_SELECTOR)) {
+                const value = String(node.nodeValue || '');
+                if (node.nodeType === 8) {
+                    if (/^\s*\/?\s*线上支付\s*$/i.test(value)) {
+                        boundaries.push({ node, start: 0, end: value.length, closing: true, comment: true });
+                    }
+                } else {
+                    PHONE_PAYMENT_TEXT_BOUNDARY_REGEX.lastIndex = 0;
+                    let match;
+                    while ((match = PHONE_PAYMENT_TEXT_BOUNDARY_REGEX.exec(value)) !== null) {
+                        boundaries.push({
+                            node,
+                            start: match.index,
+                            end: PHONE_PAYMENT_TEXT_BOUNDARY_REGEX.lastIndex,
+                            closing: match[1] === '/',
+                            comment: false
+                        });
+                    }
+                }
+            }
+            node = walker.nextNode();
+        }
+
+        const pairs = [];
+        let opener = null;
+        boundaries.forEach((boundary) => {
+            if (!opener) {
+                if (!boundary.closing) opener = boundary;
+                return;
+            }
+            if (!boundary.closing) {
+                opener = boundary;
+                return;
+            }
+            pairs.push({ opener, closer: boundary });
+            opener = null;
+        });
+
+        const found = markerElements.length > 0 || paymentElements.length > 0 || boundaries.length > 0;
+        const payments = Array.isArray(rawPayments) ? rawPayments : [];
+        const representationCount = [markerElements.length, paymentElements.length, boundaries.length].filter(Boolean).length;
+        const hasAmbiguousDom = representationCount > 1;
+        const hasUnpairedMarkerBoundary = markerElements.length !== markerPairs.length * 2;
+        const hasUnpairedTextBoundary = boundaries.length !== pairs.length * 2;
+        const paymentCount = markerElements.length > 0
+            ? markerPairs.length
+            : (paymentElements.length > 0 ? paymentElements.length : pairs.length);
+        if (!found
+            || payments.length === 0
+            || hasAmbiguousDom
+            || hasUnpairedMarkerBoundary
+            || hasUnpairedTextBoundary
+            || paymentCount !== payments.length) {
+            return { found, replaced: 0 };
+        }
+
+        let replaced = 0;
+        if (markerElements.length > 0) {
+            markerPairs.map((pair, index) => ({ ...pair, payment: payments[index] })).reverse().forEach(({ opener: start, closer: end, payment }) => {
+                const receipt = createPaymentReceiptElement(payment, renderOptions);
+                if (!receipt) return;
+
+                const range = document.createRange();
+                range.setStartBefore(start);
+                range.setEndAfter(end);
+                range.deleteContents();
+                range.insertNode(receipt);
+                range.detach?.();
+                bindPaymentReceiptNotches(receipt);
+                replaced += 1;
+            });
+            return { found, replaced };
+        }
+
+        if (paymentElements.length > 0) {
+            const hasUnsafePaymentElement = paymentElements.some(paymentElement => (
+                paymentElement.querySelector?.(PHONE_PAYMENT_FOREIGN_CONTENT_SELECTOR)
+            ));
+            if (hasUnsafePaymentElement) return { found, replaced: 0 };
+
+            paymentElements.forEach((paymentElement, index) => {
+                const receipt = createPaymentReceiptElement(payments[index], renderOptions);
+                if (!receipt) return;
+                paymentElement.replaceWith(receipt);
+                bindPaymentReceiptNotches(receipt);
+                replaced += 1;
+            });
+            return { found, replaced };
+        }
+
+        pairs.map((pair, index) => ({ ...pair, payment: payments[index] })).reverse().forEach(({ opener: start, closer: end, payment }) => {
+            const range = document.createRange();
+            range.setStart(start.node, start.start);
+            if (end.comment) range.setEndAfter(end.node);
+            else range.setEnd(end.node, end.end);
+
+            const receipt = createPaymentReceiptElement(payment, renderOptions);
+            if (!receipt) {
+                range.detach?.();
+                return;
+            }
+
+            range.deleteContents();
+            range.insertNode(receipt);
+            range.detach?.();
+            bindPaymentReceiptNotches(receipt);
+            replaced += 1;
+        });
+
+        return { found, replaced };
+    }
+
     function hidePhoneTags() {
         // 1. 注入 CSS (保证底线隐藏，防止闪烁)
         if (!document.getElementById('st-phone-hide-style')) {
             $('<style id="st-phone-hide-style">phone, wechat, music, weibo, 短信, 任务进度 { display: none !important; }</style>').appendTo('head');
         }
 
+        const receiptStyleId = phoneFloatingEntry?.getStyle?.() || PHONE_FLOATING_ENTRY_DEFAULT_STYLE;
+        const receiptHeaderImageUrl = new URL(
+            getPhoneFloatingEntryReceiptFile(receiptStyleId),
+            ST_PHONE_BASE_URL
+        ).href;
+        const receiptRenderOptions = {
+            headerImageUrl: receiptHeaderImageUrl,
+            styleId: receiptStyleId
+        };
+
         // 2. 遍历页面上的消息气泡
         $('.mes_text').each(function () {
             const root = this;
-            let html = root.innerHTML;
+            const rawMessageText = getPhoneMessageRawText(root);
 
-            // 快速跳过，提升性能
-            if (!html || !/phone|wechat|music|weibo|短信|任务进度|手机来电通话|PHONE_CHAT_MODE/i.test(html)) {
+            const existingPaymentReceipts = root.querySelectorAll('.st-phone-payment-receipt');
+            if (existingPaymentReceipts.length > 0) {
+                existingPaymentReceipts.forEach(bindPaymentReceiptNotches);
                 return;
             }
 
-            // 隐藏那些被解析为真实 DOM 元素的孤立标签
-            $(root).find('phone, wechat, music, weibo, 短信, 任务进度').hide();
+            // 只根据酒馆保存的原始消息识别手机协议。渲染后的前端可能含有 phoneEntry、
+            // openPhoneModal 等普通标识符，不能据此重写整个消息 DOM。
+            if (!PHONE_RAW_PROTOCOL_BOUNDARY_REGEX.test(rawMessageText)) return;
+
+            let html = root.innerHTML;
+            if (!html) return;
+
+            // 小票只允许替换一对明确、完整的支付边界。其余 MUV/小铅笔前端 DOM
+            // 必须原样保留；结束标签缺失或金额无效时不猜测、不裁剪、不重绘。
+            const rawHasPaymentBoundary = PHONE_PAYMENT_RAW_BOUNDARY_REGEX.test(rawMessageText);
+            const rawPayments = rawHasPaymentBoundary ? parseOfflineWechatPayments(rawMessageText) : [];
+            const paymentRenderResult = replaceCompletePaymentReceiptsInPlace(root, rawPayments, receiptRenderOptions);
+            if (rawHasPaymentBoundary || paymentRenderResult.found) return;
 
             let changed = false;
+            const preserveMessageDom = shouldPreservePhoneMessageDom(root);
+
+            // 隐藏那些被解析为真实 DOM 元素的孤立标签
+            $(root).find('phone, wechat, music, weibo, 短信, 任务进度, 线上支付').hide();
+
+            // 酒馆前端通常依赖 iframe、脚本或已绑定事件的表单控件。重写整个 .mes_text.innerHTML
+            // 会销毁这些运行时对象，表现为“编辑后恢复，下一条消息渲染时再次失效”。
+            // 这类楼层只裁掉末尾协议文本，保留已有 DOM 实例；普通消息仍走完整兼容清理。
+            if (preserveMessageDom) {
+                removePhoneProtocolSuffixPreservingDom(root);
+                root.querySelectorAll('.st-phone-payment-receipt').forEach(bindPaymentReceiptNotches);
+                return;
+            }
 
             // 策略 A: 尝试完整匹配并替换 (适用于格式完美，没有被浏览器截断的情况)
             const wechatReplaced = html.replace(WECHAT_HTML_TAG_REGEX, '');
@@ -7946,6 +9275,22 @@ if (window.GGP_Loaded) {
                 }
             });
 
+            // 金额无效等无法渲染的小票仍需清理，避免协议标签泄漏到正文。
+            const paymentTagRx = /(?:<p>|<br>\s*)*(?:<pre><code[^>]*>)?(?:<|&lt;)\s*线上支付\s*(?:>|&gt;)[\s\S]*?(?:(?:<|&lt;)\s*\/\s*线上支付\s*(?:>|&gt;)|<!--\s*\/?\s*线上支付\s*-->)(?:<\/code><\/pre>)?(?:<\/p>)?/gi;
+            const invalidPaymentReplaced = html.replace(paymentTagRx, '');
+            if (invalidPaymentReplaced !== html) {
+                html = invalidPaymentReplaced;
+                changed = true;
+            }
+
+            // 兼容提示词早期使用第二个 <线上支付> 作为结束标记的格式。
+            const repeatedPaymentTagRx = /(?:<p>|<br>\s*)*(?:<pre><code[^>]*>)?(?:<|&lt;)\s*线上支付\s*(?:>|&gt;)[\s\S]*?(?:<|&lt;)\s*线上支付\s*(?:>|&gt;)(?:<\/code><\/pre>)?(?:<\/p>)?/gi;
+            const paymentReplaced = html.replace(repeatedPaymentTagRx, '');
+            if (paymentReplaced !== html) {
+                html = paymentReplaced;
+                changed = true;
+            }
+
             // 单独处理来电标签
             const phoneCallRx = /\[手机来电通话\][^\n<]*/gi;
             if (phoneCallRx.test(html)) {
@@ -7955,7 +9300,7 @@ if (window.GGP_Loaded) {
 
             // 策略 B: 只处理独立行开始的尾部协议块，避免正文里提到标签名时误删后文。
             // 微信额外要求标准注释头，残缺的字面量 <wechat> 不参与兜底截断。
-            const fallbackRegex = /(?:^|<p>|<br>\s*)(?:<pre><code[^>]*>)?(?:<|&lt;)(?:music|phone|weibo|任务进度)(?:>|&gt;)[\s\S]*$/i;
+            const fallbackRegex = /(?:^|<p>|<br>\s*)(?:<pre><code[^>]*>)?(?:<|&lt;)(?:music|phone|weibo|任务进度|线上支付)(?:>|&gt;)[\s\S]*$/i;
             const fallbackReplaced = html.replace(fallbackRegex, '');
             if (fallbackReplaced !== html) {
                 html = fallbackReplaced;
@@ -7970,6 +9315,15 @@ if (window.GGP_Loaded) {
             if (changed) {
                 root.innerHTML = html;
             }
+
+            root.querySelectorAll('.st-phone-payment-receipt-brand-image').forEach((image) => {
+                if (image.getAttribute('src') !== receiptHeaderImageUrl) {
+                    image.setAttribute('src', receiptHeaderImageUrl);
+                }
+                const receipt = image.closest('.st-phone-payment-receipt');
+                if (receiptStyleId) receipt?.setAttribute('data-phone-floating-style', receiptStyleId);
+            });
+            root.querySelectorAll('.st-phone-payment-receipt').forEach(bindPaymentReceiptNotches);
         });
     }
 
@@ -7997,7 +9351,7 @@ if (window.GGP_Loaded) {
             const sourceConversationId = getCurrentTavernConversationIdentity();
 
             // 导入 WeChat 数据模块处理
-            import('./apps/wechat/wechat-data.js?v=20261007-voice-pool').then(async module => {
+            import('./apps/wechat/wechat-data.js?v=20261018-integration').then(async module => {
                 let wechatData;
                 if (getCurrentTavernConversationIdentity() !== sourceConversationId) {
                     console.warn('⚠️ 微信回复写入前会话已切换，丢弃旧会话回调');
@@ -8274,7 +9628,7 @@ if (window.GGP_Loaded) {
         if (!/"moments"\s*:/.test(sourceText)) return null;
 
         try {
-            const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
+            const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
             if (!window.VirtualPhone) window.VirtualPhone = {};
 
             const context = getContext();
@@ -8314,6 +9668,93 @@ if (window.GGP_Loaded) {
             console.warn('⚠️ [朋友圈] 微信并行动态解析失败:', error);
             return null;
         }
+    }
+
+    async function processWechatOfflinePaymentTags(text, metadata = {}) {
+        const payments = parseOfflineWechatPayments(text);
+        if (payments.length === 0) return [];
+
+        const sourceConversationId = getCurrentTavernConversationIdentity();
+        const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
+        if (getCurrentTavernConversationIdentity() !== sourceConversationId) {
+            console.warn('⚠️ [线上支付] 扣款前会话已切换，丢弃旧会话回调');
+            return [];
+        }
+
+        if (!window.VirtualPhone) window.VirtualPhone = {};
+        if (_lastWechatConversationId && _lastWechatConversationId !== sourceConversationId) {
+            window.VirtualPhone.wechatApp = null;
+            window.VirtualPhone.cachedWechatData = null;
+            window.currentWechatApp = null;
+            window.ggp_currentWechatApp = null;
+        }
+        _lastWechatConversationId = sourceConversationId;
+
+        const existingWechatData = window.VirtualPhone.cachedWechatData
+            || window.VirtualPhone.wechatApp?.wechatData
+            || null;
+        if (!window.VirtualPhone.cachedWechatData) {
+            window.VirtualPhone.cachedWechatData = existingWechatData || new module.WechatData(storage);
+        }
+        if (window.VirtualPhone.wechatApp
+            && window.VirtualPhone.wechatApp.wechatData !== window.VirtualPhone.cachedWechatData) {
+            window.VirtualPhone.wechatApp.wechatData = window.VirtualPhone.cachedWechatData;
+        }
+
+        const wechatData = window.VirtualPhone.cachedWechatData;
+        const floor = Number(metadata.tavernMessageIndex);
+        if (!existingWechatData && Number.isFinite(floor)) {
+            if (metadata.exactReplayForMessage === true) {
+                wechatData.removeMainChatTagMessagesAtFloor?.(floor);
+            } else {
+                wechatData.rollbackToFloor?.(floor);
+            }
+        }
+
+        const results = payments.map((payment, paymentIndex) => {
+            const referenceId = `wechat_offline_payment:${Number.isFinite(floor) ? floor : 'unknown'}:${payment.sourceIndex}:${paymentIndex}`;
+            const ledgerCopy = getOfflineWechatPaymentLedgerCopy(payment);
+            const duplicate = wechatData.getWalletTransactions?.()
+                .find(record => String(record?.referenceId || '') === referenceId);
+            if (duplicate) {
+                if (duplicate.title !== ledgerCopy.title || duplicate.detail !== ledgerCopy.detail) {
+                    duplicate.title = ledgerCopy.title;
+                    duplicate.detail = ledgerCopy.detail;
+                    wechatData.saveData?.();
+                }
+                return { success: true, duplicate: true, payment, transaction: duplicate };
+            }
+
+            const transaction = {
+                type: 'shopping',
+                title: ledgerCopy.title,
+                detail: ledgerCopy.detail,
+                source: 'offline_story',
+                sourceApp: 'wechat',
+                referenceId,
+                date: payment.date,
+                time: payment.time,
+                fromMainChatTag: true,
+                tavernMessageIndex: Number.isFinite(floor) ? floor : undefined,
+                batchId: String(metadata.batchId || '').trim()
+            };
+            const result = wechatData.spendWalletBalance(payment.amount, null, transaction);
+            if (!result.success) {
+                const reason = result.reason === 'insufficient_balance'
+                    ? `余额不足（当前 ¥${Number(result.balanceBefore || 0).toFixed(2)}，需扣 ¥${Number(payment.amount).toFixed(2)}）`
+                    : '扣款金额无效';
+                console.warn(`⚠️ [线上支付] ${reason}`, payment);
+            }
+            return { ...result, payment };
+        });
+
+        if (results.some(result => result.success && !result.duplicate)) {
+            const wechatApp = window.VirtualPhone.wechatApp || window.currentWechatApp || window.ggp_currentWechatApp;
+            if (document.querySelector('.wechat-wallet-ledger-page')) {
+                wechatApp?.showWalletPage?.();
+            }
+        }
+        return results;
     }
 
     function processWechatLikeTagsInSourceOrder(text, tavernIndex, batchId, isHistoryReplay = false, exactReplayForMessage = false) {
@@ -8526,6 +9967,8 @@ if (window.GGP_Loaded) {
                 if (listenUserMessages) {
                     scheduleAutoWeiboIfDue({ reason: 'user_message' });
                 }
+                syncMofoBubbleFromLatestMessage({ messageIndex: index, text })
+                    .catch(e => console.warn('Mofo bubble sync error:', e));
                 return; // 用户消息处理完毕后退出，不走下面的 AI 标签解析链路
             }
 
@@ -8533,6 +9976,10 @@ if (window.GGP_Loaded) {
             // 🚫 以下功能，只有在手机启用时才解析
             // ==========================================
             let exactReplayForMessage = false;
+            if (!isPhoneFeatureEnabled()) {
+                syncMofoBubbleFromLatestMessage({ messageIndex: index, text, updates: [] })
+                    .catch(e => console.warn('Mofo bubble sync error:', e));
+            }
             if (isPhoneFeatureEnabled()) {
                 // 🔥🔥🔥 核心修复：在解析新标签之前，先回滚该楼层的旧数据！🔥🔥🔥
                 // 这样无论是 Regenerate 还是 Swipe，都能正确清除旧消息再写入新消息。
@@ -8565,13 +10012,13 @@ if (window.GGP_Loaded) {
                         markUnread: true
                     });
                     processWechatLikeTagsInSourceOrder(text, index, currentBatchId, isHistoryReplay, exactReplayForMessage);
+                    processWechatOfflinePaymentTags(text, {
+                        tavernMessageIndex: index,
+                        batchId: currentBatchId,
+                        exactReplayForMessage
+                    }).catch(e => console.warn('Wechat offline payment tag process error:', e));
                     processMofoTags(text, { source: 'assistant', messageIndex: index }).then(updates => {
-                        // 只要有魔坊条目匹配到更新，优先弹 changed 的；否则弹第一个匹配项
-                        if (!Array.isArray(updates) || updates.length === 0) return;
-                        const preferred = updates.find(u => u && u.changed && u.id) || updates.find(u => u && u.id);
-                        if (preferred && window.VirtualPhone?.showMofoUpdateBubble) {
-                            window.VirtualPhone.showMofoUpdateBubble(preferred.id);
-                        }
+                        return syncMofoBubbleFromLatestMessage({ messageIndex: index, text, updates });
                     }).catch(e => console.warn('Mofo tag process error:', e));
                     processWangxiangTaskProgressTags(text, {
                         tavernMessageIndex: index,
@@ -8580,6 +10027,9 @@ if (window.GGP_Loaded) {
                         .catch(e => console.warn('Wangxiang task progress tag process error:', e))
                         .then(() => processWangxiangMarketplaceDeliveries())
                         .catch(e => console.warn('Wangxiang marketplace delivery check error:', e));
+                } else {
+                    syncMofoBubbleFromLatestMessage({ messageIndex: index, text })
+                        .catch(e => console.warn('Mofo history bubble sync error:', e));
                 }
                 // 历史重绘也做幂等补录，用于修复旧解析器漏掉的同楼层短信。
                 processSmsTags(text, index, currentBatchId, { isHistoryReplay });
@@ -8956,7 +10406,7 @@ if (window.GGP_Loaded) {
         resetAutoDiaryQueue('chat_changed');
         storyImageAutoScheduler?.reset?.('chat_changed');
         ensureWechatInteractionDefaults();
-        window.VirtualPhone?.hideMofoUpdateBubble?.();
+        invalidateMofoBubbleSync();
 
         // 🔥 切换会话时彻底清空微信单例缓存，防止数据串味
         if (window.VirtualPhone) {
@@ -9041,6 +10491,12 @@ if (window.GGP_Loaded) {
         }
 
         loadData();
+
+        setTimeout(() => {
+            rebuildMofoStateAndSyncBubble()
+                .then(() => refreshMofoInlineMessages())
+                .catch(e => console.warn('Mofo chat change refresh error:', e));
+        }, 120);
 
         // 🔥 切换会话时，按需加载 TimeManager 和 PromptManager
         // 这样聊天时提示词能正常注入，不需要先打开手机面板
@@ -9415,11 +10871,19 @@ if (window.GGP_Loaded) {
             await loadCoreModules();
             let phonePromptHandler = async () => {};
             let phonePromptRunTail = Promise.resolve();
-            const PHONE_REQUEST_MACRO_PATTERN = /\{\{\s*(?:PHONE_PROMPT|PHONE_HISTORY|PHONE_APP_HISTORY|MOMENTS_HISTORY|HONEY_HISTORY|WEIBO_HISTORY|MUSIC_PROMPT|MOFO_PROMPT|DIARY_HISTORY|CALENDAR_REMINDER|WANGXIANG_TASKS|WANGXIANG_ORDERS)\s*\}\}/i;
+            const phonePromptRunsByChat = new WeakMap();
             const runPhonePromptHandler = (eventData, source = 'unknown') => {
+                const chat = Array.isArray(eventData?.chat) ? eventData.chat : null;
+                if (chat && phonePromptRunsByChat.has(chat)) {
+                    return phonePromptRunsByChat.get(chat);
+                }
+
                 const run = phonePromptRunTail
                     .catch(() => undefined)
                     .then(() => phonePromptHandler(eventData));
+                if (chat) {
+                    phonePromptRunsByChat.set(chat, run);
+                }
                 phonePromptRunTail = run.catch((error) => {
                     console.warn(`[手机插件] ${source} 注入队列异常:`, error);
                 });
@@ -9452,12 +10916,15 @@ if (window.GGP_Loaded) {
                 applyGlobalTextColor: applyGlobalTextColor,
                 refreshGlobalTextColorStyle: ensureGlobalTextColorOverrideStyle,
                 syncFloatingEntry: syncPhoneFloatingEntry,
+                refreshMofoInlineMessages: refreshMofoInlineMessages,
+                syncMofoBubbleFromLatestMessage: syncMofoBubbleFromLatestMessage,
                 home: null,
                 wechatApp: null,
                 mofoApp: null,
                 cachedMofoData: null,
                 notify: showUnifiedPhoneNotification,
                 checkCalendarScheduleReminders: checkCalendarScheduleReminders,
+                checkWalletCreditRepayments: checkWalletCreditRepayments,
                 playWechatMessageSound: playWechatMessageSound,
                 markWechatOnlineToOfflineTransferPending: markWechatOnlineToOfflineTransferPending,
                 showCurrentUpdateInfo: async () => showPhoneUpdateModal('local', await fetchLocalUpdateNotes(ST_PHONE_VERSION), {
@@ -9491,11 +10958,38 @@ if (window.GGP_Loaded) {
                 _storyImageAutoRunning: false
             };
 
+            try {
+                registerPaymentMessageFormatter();
+            } catch (paymentFormatterError) {
+                console.warn('⚠️ [线上支付] 正文边界标记初始化失败:', paymentFormatterError);
+            }
+
+            try {
+                await getOrCreateMofoData();
+                if (registerMofoMessageFormatter()) {
+                    setTimeout(refreshMofoInlineMessages, 0);
+                }
+            } catch (mofoFormatterError) {
+                console.warn('⚠️ [魔坊] 正文渲染器初始化失败:', mofoFormatterError);
+            }
+
             window.addEventListener('phone:storyImageSettingsChanged', (event) => {
                 if (event?.detail?.settings?.autoEnabled === false) {
                     storyImageAutoScheduler?.reset?.('auto-disabled');
                 }
             });
+            window.addEventListener('phone:floatingEntrySettingsChanged', hidePhoneTags);
+            if (!window.__stPhoneWalletRepaymentTimeBound) {
+                window.__stPhoneWalletRepaymentTimeBound = true;
+                window.addEventListener('phone:timeUpdated', () => {
+                    Promise.resolve().then(() => {
+                        const latestTime = window.VirtualPhone?.timeManager?.getCurrentStoryTime?.();
+                        return checkWalletCreditRepayments(latestTime);
+                    }).catch(error => {
+                        console.warn('[Wechat][Wallet] 时间更新后的自动还款检测失败:', error);
+                    });
+                });
+            }
 
             // 🔥 关键修复：启动时就预热 TimeManager / PromptManager，
             // 避免“未切会话、未打开手机面板”时线下注入因懒加载对象仍为 null 而失效。
@@ -9551,8 +11045,21 @@ if (window.GGP_Loaded) {
             // 🔥 wechat 标签隐藏已移至酒馆正则设置
             // 请在酒馆设置中添加正则：((?:<wechat>|^)[\s\S]*?<\/wechat>)
 
+            // 文本拖选可能从手机内开始、在手机外释放。记录按下起点，避免尾随 click 误关手机。
+            document.addEventListener('pointerdown', (e) => {
+                const path = e.composedPath?.() || [];
+                phonePointerSequenceStartedInside = path.some(el => {
+                    if (!el) return false;
+                    if (el.id === 'phoneDrawerIcon' || el.id === 'phoneDrawerToolEntry' || el.id === 'phoneDrawerToolRow') return true;
+                    return !!(el.classList && el.classList.contains('phone-in-panel'));
+                });
+            }, true);
+
             // 🔥 全局极轻量级监听：三击空白处呼出/隐藏手机
             document.body.addEventListener('click', (e) => {
+                const pointerSequenceStartedInside = phonePointerSequenceStartedInside;
+                phonePointerSequenceStartedInside = false;
+
                 // 如果功能被禁用，直接退出
                 if (!isPhoneFeatureEnabled()) return;
 
@@ -9575,6 +11082,7 @@ if (window.GGP_Loaded) {
                     && drawerPanel?.classList.contains('phone-panel-open')
                     && isDesktopPhonePanelDragEnabled()
                     && !isInsidePhone
+                    && !pointerSequenceStartedInside
                 ) {
                     phoneTapCount = 0;
                     phoneLastTapTime = 0;
@@ -10106,7 +11614,7 @@ if (window.GGP_Loaded) {
 
                     let wechatData = window.VirtualPhone?.wechatApp?.wechatData || window.VirtualPhone?.cachedWechatData;
                     if (!wechatData) {
-                        const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
+                        const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
                         wechatData = new module.WechatData(storage);
                     }
 
@@ -10185,6 +11693,7 @@ if (window.GGP_Loaded) {
                     /<Honey>[\s\S]*?<\/Honey>/gi,
                     /<\s*短信\s*>[\s\S]*?<\s*\/\s*短信\s*>/gi
                 ]);
+                refreshMofoInlineMessages();
             });
 
             window.addEventListener('phone:clearAllData', async () => { // 🔥 加上 async
@@ -10259,11 +11768,42 @@ if (window.GGP_Loaded) {
                     /<Honey>[\s\S]*?<\/Honey>/gi,
                     /<\s*短信\s*>[\s\S]*?<\s*\/\s*短信\s*>/gi
                 ]);
+                refreshMofoInlineMessages();
             });
 
             // 连接到酒馆
             const context = getContext();
             if (context && context.eventSource) {
+                const registerPhonePromptMacros = () => {
+                    if (window._stPhonePromptMacrosRegistered) return true;
+                    let registered = 0;
+                    PHONE_PROMPT_MACRO_NAMES.forEach((name) => {
+                        try {
+                            const marker = getPhonePromptMarker(name);
+                            if (context.macros?.registry?.hasMacro?.(name)) {
+                                registered += 1;
+                                return;
+                            }
+                            if (typeof context.macros?.register === 'function') {
+                                context.macros.register(name, {
+                                    category: 'extension',
+                                    description: `Yuzuki Phone placeholder for ${name}`,
+                                    handler: () => marker
+                                });
+                                registered += 1;
+                            } else if (typeof context.registerMacro === 'function') {
+                                context.registerMacro(name, () => marker, `Yuzuki Phone placeholder for ${name}`);
+                                registered += 1;
+                            }
+                        } catch (error) {
+                            console.warn(`[手机插件] 注册 ${name} 宏失败:`, error);
+                        }
+                    });
+                    window._stPhonePromptMacrosRegistered = registered === PHONE_PROMPT_MACRO_NAMES.length;
+                    return window._stPhonePromptMacrosRegistered;
+                };
+                registerPhonePromptMacros();
+
                 context.eventSource.on(
                     context.event_types.CHARACTER_MESSAGE_RENDERED,
                     onMessageReceived
@@ -10277,11 +11817,56 @@ if (window.GGP_Loaded) {
                 }
 
                 if (context.event_types.MESSAGE_DELETED) {
-                    context.eventSource.on(context.event_types.MESSAGE_DELETED, (eventData) => {
+                    context.eventSource.on(context.event_types.MESSAGE_DELETED, async (eventData) => {
                         const deletedFloor = Number(eventData?.messageId ?? eventData?.id ?? eventData);
                         if (Number.isFinite(deletedFloor)) {
                             invalidateStoryImageAutoFromFloor(deletedFloor, 'message-deleted');
                             rollbackPhoneSmsToFloor(deletedFloor, false);
+                            invalidateMofoBubbleSync();
+                            setTimeout(() => {
+                                rebuildMofoStateAndSyncBubble()
+                                    .catch(e => console.warn('Mofo delete refresh error:', e));
+                            }, 80);
+
+                            try {
+                                const sourceConversationId = getCurrentTavernConversationIdentity();
+                                if (!window.VirtualPhone) window.VirtualPhone = {};
+
+                                if (_lastWechatConversationId && _lastWechatConversationId !== sourceConversationId) {
+                                    window.VirtualPhone.wechatApp = null;
+                                    window.VirtualPhone.cachedWechatData = null;
+                                    window.currentWechatApp = null;
+                                    window.ggp_currentWechatApp = null;
+                                }
+                                _lastWechatConversationId = sourceConversationId;
+
+                                let wechatDataInstance = window.VirtualPhone.wechatApp?.wechatData
+                                    || window.VirtualPhone.cachedWechatData
+                                    || null;
+                                if (!wechatDataInstance && storage) {
+                                    const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
+                                    if (getCurrentTavernConversationIdentity() !== sourceConversationId) {
+                                        console.warn('⚠️ 微信删楼回滚期间会话已切换，丢弃旧会话回调');
+                                        return;
+                                    }
+                                    window.VirtualPhone.cachedWechatData = new module.WechatData(storage);
+                                    wechatDataInstance = window.VirtualPhone.cachedWechatData;
+                                }
+
+                                if (window.VirtualPhone.wechatApp
+                                    && wechatDataInstance
+                                    && window.VirtualPhone.wechatApp.wechatData !== wechatDataInstance) {
+                                    window.VirtualPhone.wechatApp.wechatData = wechatDataInstance;
+                                }
+
+                                const hasRolledBack = wechatDataInstance?.rollbackToFloor?.(deletedFloor) === true;
+                                const activeWechatApp = window.currentWechatApp || window.ggp_currentWechatApp;
+                                if (hasRolledBack && activeWechatApp && !document.querySelector('.call-fullscreen')) {
+                                    setTimeout(() => activeWechatApp.render(), 20);
+                                }
+                            } catch (error) {
+                                console.warn('⚠️ [手机插件] 删除楼层后回滚微信数据失败:', error);
+                            }
                         }
                     });
                 }
@@ -10289,8 +11874,17 @@ if (window.GGP_Loaded) {
                 if (context.event_types.GENERATION_STARTED) {
                     context.eventSource.on(
                         context.event_types.GENERATION_STARTED,
-                        interruptStoryImageAutoForForegroundGeneration
+                        (type, params = {}, isDryRun = false) => {
+                            interruptStoryImageAutoForForegroundGeneration(type, params, isDryRun);
+                            markPhoneForegroundGeneration(type, 'generation_started', isDryRun);
+                        }
                     );
+                }
+                if (context.event_types.GENERATION_ENDED) {
+                    context.eventSource.on(context.event_types.GENERATION_ENDED, clearPhoneForegroundGeneration);
+                }
+                if (context.event_types.GENERATION_STOPPED) {
+                    context.eventSource.on(context.event_types.GENERATION_STOPPED, clearPhoneForegroundGeneration);
                 }
 
                 context.eventSource.on(
@@ -10430,27 +12024,17 @@ if (window.GGP_Loaded) {
                         // 🔥 终极护盾：专门为懒加载失败、页面休眠、提前退出准备的清洗器
                         const forceFallbackCleanup = (chatArray) => {
                             if (!Array.isArray(chatArray)) return;
-                            const macros = ['{{PHONE_PROMPT}}', '{{PHONE_HISTORY}}', '{{PHONE_APP_HISTORY}}', '{{MOMENTS_HISTORY}}', '{{HONEY_HISTORY}}', '{{WEIBO_HISTORY}}', '{{MUSIC_PROMPT}}', '{{MOFO_PROMPT}}', '{{DIARY_HISTORY}}', '{{CALENDAR_REMINDER}}', '{{WANGXIANG_TASKS}}', '{{WANGXIANG_ORDERS}}'];
                             chatArray.forEach(msg => {
                                 // 🌟 兼容移动端特殊请求体格式读取
-                                let c = msg.content || msg.mes || (msg.parts && msg.parts[0] ? msg.parts[0].text : '') || '';
+                                let c = msg.content || msg.mes || msg.text || (msg.parts && msg.parts[0] ? msg.parts[0].text : '') || '';
                                 if (typeof c === 'string') {
-                                    let modified = false;
-                                    macros.forEach(macro => {
-                                        if (c.includes(macro)) {
-                                            c = c.split(macro).join('').trim();
-                                            modified = true;
-                                        }
-                                    });
-                                    // 兼容 {{ XXX }}（含空格）
-                                    if (/\{\{\s*(PHONE_APP_HISTORY|MOMENTS_HISTORY|HONEY_HISTORY|MOFO_PROMPT|DIARY_HISTORY|CALENDAR_REMINDER|WANGXIANG_TASKS|WANGXIANG_ORDERS)\s*\}\}/i.test(c)) {
-                                        c = c.replace(/\{\{\s*(PHONE_APP_HISTORY|MOMENTS_HISTORY|HONEY_HISTORY|MOFO_PROMPT|DIARY_HISTORY|CALENDAR_REMINDER|WANGXIANG_TASKS|WANGXIANG_ORDERS)\s*\}\}/gi, '').trim();
-                                        modified = true;
-                                    }
-                                    if (modified) {
+                                    const cleaned = stripPhonePromptPlaceholders(c);
+                                    if (cleaned.changed) {
+                                        c = cleaned.text;
                                         // 🌟 兼容移动端特殊请求体格式写入
                                         if (msg.content !== undefined) msg.content = c;
                                         if (msg.mes !== undefined) msg.mes = c;
+                                        if (msg.text !== undefined) msg.text = c;
                                         if (msg.parts && msg.parts[0] !== undefined) msg.parts[0].text = c;
                                     }
                                 }
@@ -10475,6 +12059,30 @@ if (window.GGP_Loaded) {
                                 return; 
                             }
 
+                            const requirePhoneInjectionVariable = isPhoneInjectionVariableRequired();
+                            const requestHasPhoneMacro = (() => {
+                                try {
+                                    return PHONE_REQUEST_MACRO_PATTERN.test(JSON.stringify({
+                                        chat: eventData.chat,
+                                        prompt: eventData.prompt
+                                    }));
+                                } catch (_error) {
+                                    return false;
+                                }
+                            })();
+                            const requestHasInjectedPhoneMessages = [eventData.chat, eventData.prompt]
+                                .some(list => Array.isArray(list) && list.some(msg => msg?.isPhoneMessage && msg?.identifier));
+                            const hasWechatOnlineToOfflinePending = !!getWechatOnlineToOfflineTransferPending();
+
+                            // prompt-ready 可能被多个官方/兼容入口依次处理。变量已替换成手机消息后，
+                            // 后续入口必须保留现有注入，不能先删除消息再因找不到变量而退出。
+                            if (requirePhoneInjectionVariable && !requestHasPhoneMacro && !hasWechatOnlineToOfflinePending) {
+                                if (requestHasInjectedPhoneMessages) return;
+                                forceFallbackCleanup(eventData.chat);
+                                forceFallbackCleanup(eventData.prompt);
+                                return;
+                            }
+
                             // 2. 如果是酒馆正文发起的请求（比如点击正文发送、重新生成、继续生成）
                             if (eventData.chat && Array.isArray(eventData.chat)) {
                                 // 🧹 清理重绘缓存：
@@ -10496,24 +12104,6 @@ if (window.GGP_Loaded) {
                                         eventData.prompt.splice(i, 1);
                                     }
                                 }
-                            }
-
-                            const requirePhoneInjectionVariable = isPhoneInjectionVariableRequired();
-                            const requestHasPhoneMacro = (() => {
-                                try {
-                                    return PHONE_REQUEST_MACRO_PATTERN.test(JSON.stringify({
-                                        chat: eventData.chat,
-                                        prompt: eventData.prompt
-                                    }));
-                                } catch (_error) {
-                                    return false;
-                                }
-                            })();
-                            const hasWechatOnlineToOfflinePending = !!getWechatOnlineToOfflineTransferPending();
-                            if (requirePhoneInjectionVariable && !requestHasPhoneMacro && !hasWechatOnlineToOfflinePending) {
-                                forceFallbackCleanup(eventData.chat);
-                                forceFallbackCleanup(eventData.prompt);
-                                return;
                             }
 
                             // 📱 收集手机活动记录
@@ -10555,7 +12145,7 @@ if (window.GGP_Loaded) {
                                     let wechatDataInstance = window.VirtualPhone?.wechatApp?.wechatData || window.VirtualPhone?.cachedWechatData;
                                     if (!wechatDataInstance && storage) {
                                         try {
-                                            const module = await import('./apps/wechat/wechat-data.js?v=20261007-voice-pool');
+                                            const module = await import('./apps/wechat/wechat-data.js?v=20261018-integration');
                                             if (!window.VirtualPhone) window.VirtualPhone = {};
                                             window.VirtualPhone.cachedWechatData = new module.WechatData(storage);
                                             wechatDataInstance = window.VirtualPhone.cachedWechatData;
@@ -11327,6 +12917,8 @@ if (window.GGP_Loaded) {
                                                 let wechatContactsList = '';
                                                 let wechatFriendsList = '';
                                                 let wechatGroupsList = '';
+                                                let wechatUserName = '未设置';
+                                                let wechatWalletBalance = '未初始化';
                                                 let personalImageTagInfo = '暂无';
                                                 try {
                                                     let wechatDataParsed = null;
@@ -11342,6 +12934,23 @@ if (window.GGP_Loaded) {
                                                     }
 
                                                     if (wechatDataParsed) {
+                                                        const savedWechatUserName = String(wechatDataParsed?.userInfo?.name || '').trim();
+                                                        if (savedWechatUserName) wechatUserName = savedWechatUserName;
+                                                        const runtimeWechatData = window.VirtualPhone?.wechatApp?.wechatData
+                                                            || window.VirtualPhone?.cachedWechatData
+                                                            || null;
+                                                        const runtimeBalance = runtimeWechatData?.getWalletBalance?.();
+                                                        const storedBalance = wechatDataParsed?.walletByChat?.__default__
+                                                            ?? wechatDataParsed?.userInfo?.walletBalance;
+                                                        const walletBalance = Number(runtimeBalance ?? storedBalance);
+                                                        if ((runtimeBalance ?? storedBalance) !== null
+                                                            && (runtimeBalance ?? storedBalance) !== undefined
+                                                            && Number.isFinite(walletBalance)) {
+                                                            wechatWalletBalance = `¥${walletBalance.toLocaleString('zh-CN', {
+                                                                minimumFractionDigits: 2,
+                                                                maximumFractionDigits: 2
+                                                            })}`;
+                                                        }
                                                         const contactNames = [];
                                                         const personalImageTagRows = [];
                                                         const groupItems = [];
@@ -11402,6 +13011,8 @@ if (window.GGP_Loaded) {
                                                     .replace(/\{\{wechatFriends\}\}/g, wechatFriendsList)
                                                     .replace(/\{\{wechatGroups\}\}/g, wechatGroupsList)
                                                     .replace(/\{\{wechatContacts\}\}/g, wechatContactsList)
+                                                    .replace(/\{\{wechatUserName\}\}/g, wechatUserName)
+                                                    .replace(/\{\{wechatWalletBalance\}\}/g, wechatWalletBalance)
                                                     .replace(/\{\{personalImageTagInfo\}\}/g, personalImageTagInfo);
                                                 phoneRulesContent += `【微信线下模式】\n${wechatPrompt}\n\n`;
                                             }
@@ -11986,6 +13597,7 @@ if (window.GGP_Loaded) {
                                         const spacedVarRegex = normalizedVarName
                                             ? new RegExp(`\\{\\{\\s*${normalizedVarName}\\s*\\}\\}`, 'i')
                                             : null;
+                                        const stableMarker = getPhonePromptMarker(normalizedVarName);
                                         // 1. 如果没有内容要注入，执行安全清洗，把占位符彻底删掉
                                         if (!contentToInject) {
                                             for (let i = 0; i < messages.length; i++) {
@@ -11993,13 +13605,15 @@ if (window.GGP_Loaded) {
                                                 let msgContent = msg.content || msg.mes || msg.text || (msg.parts && msg.parts[0] ? msg.parts[0].text : '') || '';
                                                 const hasExact = typeof msgContent === 'string' && msgContent.includes(targetVar);
                                                 const hasSpaced = typeof msgContent === 'string' && !!spacedVarRegex && spacedVarRegex.test(msgContent);
-                                                if (hasExact || hasSpaced) {
+                                                const hasStableMarker = typeof msgContent === 'string' && msgContent.includes(stableMarker);
+                                                if (hasExact || hasSpaced || hasStableMarker) {
                                                     let cleanedText = String(msgContent || '');
                                                     if (hasExact) cleanedText = cleanedText.split(targetVar).join('');
                                                     if (hasSpaced && spacedVarRegex) {
                                                         const spacedVarGlobalRegex = new RegExp(`\\{\\{\\s*${normalizedVarName}\\s*\\}\\}`, 'gi');
                                                         cleanedText = cleanedText.replace(spacedVarGlobalRegex, '');
                                                     }
+                                                    if (hasStableMarker) cleanedText = cleanedText.split(stableMarker).join('');
                                                     cleanedText = cleanedText.trim();
                                                     if (!cleanedText) {
                                                         messages.splice(i, 1);
@@ -12016,6 +13630,7 @@ if (window.GGP_Loaded) {
                                         }
 
                                         // 2. 准备要插入的系统块
+                                        const resolvedContentToInject = substitutePhoneInjectedMacros(contentToInject, getContext());
                                         const isGemini = messages.length > 0 && messages[0].parts !== undefined;
                                         const resolveInjectedSystemName = (id, text) => {
                                             if (id === 'weibo_system_history') return 'SYSTEM (微博)';
@@ -12039,12 +13654,12 @@ if (window.GGP_Loaded) {
                                         };
                                         const msgObj = {
                                             role: isGemini ? 'user' : 'system', // Gemini不允许塞system
-                                            content: contentToInject,
+                                            content: resolvedContentToInject,
                                             isPhoneMessage: true,
                                             identifier: identifier,
-                                            name: resolveInjectedSystemName(identifier, contentToInject)
+                                            name: resolveInjectedSystemName(identifier, resolvedContentToInject)
                                         };
-                                        if (isGemini) msgObj.parts = [{ text: contentToInject }];
+                                        if (isGemini) msgObj.parts = [{ text: resolvedContentToInject }];
 
                                         // 3. 开始遍历并原地切割注入
                                         let replaced = false;
@@ -12061,6 +13676,11 @@ if (window.GGP_Loaded) {
                                                         varIndex = match.index;
                                                         varLen = match[0].length;
                                                     }
+                                                }
+                                                const markerIndex = msgContent.indexOf(stableMarker);
+                                                if (markerIndex >= 0 && (varIndex < 0 || markerIndex < varIndex)) {
+                                                    varIndex = markerIndex;
+                                                    varLen = stableMarker.length;
                                                 }
                                                 if (varIndex < 0) continue;
 
@@ -12462,6 +14082,13 @@ if (window.GGP_Loaded) {
                                                 modified = true;
                                             }
 
+                                            // TT 2.3 注册宏后会把原始变量转换成稳定标记，这里一并清理未消费残骸。
+                                            const placeholderCleanup = stripPhonePromptPlaceholders(c);
+                                            if (placeholderCleanup.changed) {
+                                                c = placeholderCleanup.text;
+                                                modified = true;
+                                            }
+
                                             // 2. 抹除隐秘标签 (仅限 assistant 角色)
                                             if (msg.role === 'assistant') {
                                                 // 统一清洗 Phone, Music 标签。
@@ -12505,21 +14132,33 @@ if (window.GGP_Loaded) {
                         }
                 }; // 结束 phonePromptHandler 定义
 
-                // 🔥 移动端终极修复：回归同步过滤器，防止酒馆在手机端丢弃异步上下文
+                // 官方事件是主注入链；旧 filter 只作为兼容入口。小手机必须先于会克隆 chat
+                // 的扩展执行，否则后续注入会落在非酒馆最终发送的数组上。
+                const eventTypes = context.eventTypes || context.event_types || window.eventTypes || window.event_types || {};
+                let phonePromptBridgeRegistered = false;
+
+                if (eventTypes.CHAT_COMPLETION_PROMPT_READY && context.eventSource) {
+                    const phonePromptReadyListener = (eventData) => runPhonePromptHandler(eventData, 'prompt_ready_event');
+                    if (typeof context.eventSource.makeFirst === 'function') {
+                        context.eventSource.makeFirst(eventTypes.CHAT_COMPLETION_PROMPT_READY, phonePromptReadyListener);
+                        phonePromptBridgeRegistered = true;
+                    } else if (typeof context.eventSource.on === 'function') {
+                        context.eventSource.on(eventTypes.CHAT_COMPLETION_PROMPT_READY, phonePromptReadyListener);
+                        phonePromptBridgeRegistered = true;
+                    }
+                }
+
                 if (window.hooks && typeof window.hooks.addFilter === 'function') {
-                    // 🔥 核心修复：加上 async 和 await，强迫酒馆发包前必须等我们的变量替换彻底完成！
                     window.hooks.addFilter('chat_completion_prompt_ready', async (chat) => {
-                        // 包装成旧版 eventData 格式兼容原有代码
-                        let eventData = { chat: chat, prompt: [] };
-                        await runPhonePromptHandler(eventData, 'prompt_ready');
-                        return eventData.chat; // 必须返回修改后的数组给酒馆
+                        const eventData = { chat, prompt: [] };
+                        await runPhonePromptHandler(eventData, 'prompt_ready_filter');
+                        return eventData.chat;
                     });
-                } else {
-                    // 旧版本酒馆兼容
-                    context.eventSource.on(
-                        context.event_types.CHAT_COMPLETION_PROMPT_READY,
-                        (eventData) => runPhonePromptHandler(eventData, 'prompt_ready_event')
-                    );
+                    phonePromptBridgeRegistered = true;
+                }
+
+                if (!phonePromptBridgeRegistered) {
+                    console.warn('⚠️ [手机插件] 未找到可用的 prompt-ready 注入入口');
                 }
 
             } else {

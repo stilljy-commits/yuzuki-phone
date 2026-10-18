@@ -12,9 +12,10 @@
 // ========================================
 // 微信通讯录视图
 // ========================================
-import { ImageCropper } from '../settings/image-cropper.js';
+import { ImageCropper } from '../settings/image-cropper.js?v=20261018-integration';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
+import { ContactProfileView } from './contact-profile.js?v=20261018-integration';
 
 export class ContactsView {
     constructor(wechatApp) {
@@ -140,6 +141,7 @@ export class ContactsView {
             { id: 'minimax_cn', label: 'MiniMax 国内', placeholder: '例如 female-shaonv' },
             { id: 'minimax_intl', label: 'MiniMax 国际', placeholder: '例如 female-shaonv' },
             { id: 'openai', label: 'OpenAI', placeholder: '例如 alloy' },
+            { id: 'fish', label: 'Fish Audio', placeholder: '填写 Fish reference_id' },
             { id: 'indextts', label: 'IndexTTS 本地', placeholder: '例如 default.wav / 角色.wav' },
             { id: 'nimo', label: 'MiMo-V2.5-TTS', placeholder: '例如 mimo_default / nimo_clone_* / 声音描述' },
             { id: 'volcengine', label: '豆包 / 火山引擎', placeholder: '例如 BV700_streaming' }
@@ -152,6 +154,30 @@ export class ContactsView {
 
     _getContactTtsVoices(contact = {}) {
         return (contact?.ttsVoices && typeof contact.ttsVoices === 'object') ? contact.ttsVoices : {};
+    }
+
+    _getVolcVoicePoolOptions(selectedVoice = '') {
+        try {
+            const raw = this.app.storage.get('phone-tts-volc-voice-pool') || '[]';
+            const pool = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (!Array.isArray(pool)) return '';
+
+            const selected = String(selectedVoice || '').trim();
+            const seen = new Set();
+            return pool.map(item => {
+                if (!item || typeof item !== 'object') return '';
+                const id = String(item.id || '').trim();
+                if (!id || seen.has(id)) return '';
+                seen.add(id);
+                const label = String(item.label || '').trim();
+                const gender = item.gender === 'f' ? '女' : (item.gender === 'm' ? '男' : '中性');
+                const text = label ? `${label} · ${gender}（${id}）` : `${id} · ${gender}`;
+                return `<option value="${this._escapeAttr(id)}"${id === selected ? ' selected' : ''}>${this._escapeHtml(text)}</option>`;
+            }).join('');
+        } catch (e) {
+            console.warn('读取豆包音色池失败:', e);
+            return '';
+        }
     }
 
     _getTtsVoiceHistoryOptions() {
@@ -404,6 +430,7 @@ export class ContactsView {
                 white-space: nowrap;
                 display: flex;
             ">
+                <div class="contact-menu-item" data-action="profile" style="padding:4px 10px;color:#576b95;font-size:11px;cursor:pointer;border-right:0.5px solid #e5e5e5;">人物详情</div>
                 <div class="contact-menu-item" data-action="edit" style="
                     padding: 4px 10px;
                     color: #576b95;
@@ -424,6 +451,13 @@ export class ContactsView {
 
         element.style.position = 'relative';
         element.insertAdjacentHTML('beforeend', menuHtml);
+
+        element.querySelector('.contact-menu-item[data-action="profile"]')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            document.querySelectorAll('.contact-action-menu').forEach(menu => menu.remove());
+            this.showContactDetailsPage(contactId);
+        });
 
         element.querySelector('.contact-menu-item[data-action="edit"]')?.addEventListener('click', (e) => {
             e.preventDefault();
@@ -555,6 +589,11 @@ export class ContactsView {
         });
     }
 
+    showContactDetailsPage(contactId, options = {}) {
+        if (!this._contactProfileView) this._contactProfileView = new ContactProfileView(this);
+        this._contactProfileView.show(contactId, options);
+    }
+
     showEditContactPage(contactId, options = {}) {
         const contact = this.app.wechatData.getContact(contactId)
             || this.app.wechatData.findContactByNameLoose?.(contactId, { includeChats: false });
@@ -563,6 +602,10 @@ export class ContactsView {
         const returnToChatList = options?.returnToChatList === true;
         const returnToChatId = String(options?.returnToChatId || '').trim();
         const returnFromEditContact = () => {
+            if (options.returnToContactDetails === true) {
+                this.showContactDetailsPage(safeContactId, options);
+                return;
+            }
             if (returnToChatId) {
                 this.app.currentView = 'chats';
                 this.app.currentChat = this.app.wechatData.getChat(returnToChatId) || null;
@@ -844,6 +887,7 @@ export class ContactsView {
                                         const providerVoice = String(contactTtsVoices?.[option.id] || '').trim();
                                         const value = providerVoice || (option.id === currentTtsProvider ? legacyTtsVoice : '');
                                         const activeText = option.id === currentTtsProvider ? '当前' : '';
+                                        const poolOptions = option.id === 'volcengine' ? this._getVolcVoicePoolOptions(value) : '';
                                         return `
                                             <label style="display: block;">
                                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
@@ -859,6 +903,16 @@ export class ContactsView {
                                                     font-size: 12px;
                                                     box-sizing: border-box;
                                                 ">
+                                                ${option.id === 'volcengine' ? `
+                                                    <select id="edit-contact-volc-pool-select" aria-label="从豆包音色池选择" ${poolOptions ? '' : 'disabled'} style="
+                                                        width: 100%; min-width: 0; height: 34px; margin-top: 6px; padding: 0 8px;
+                                                        ${softFieldStyle} border-radius: 6px; font-size: 12px; box-sizing: border-box;
+                                                    ">
+                                                        <option value="">${poolOptions ? '-- 从导入音色池选择 --' : '音色池为空，请先在设置中导入'}</option>
+                                                        ${poolOptions}
+                                                    </select>
+                                                    <div style="font-size: 10px; color: #999; line-height: 1.4; margin-top: 4px;">用于豆包 / 火山引擎。选择后填入上方音色 ID，保存后优先于自动分配；清空上方音色 ID 可恢复自动分配。</div>
+                                                ` : ''}
                                             </label>
                                         `;
                                     }).join('')}
@@ -1002,8 +1056,23 @@ export class ContactsView {
                 const currentInput = query(`.edit-contact-tts-provider-input[data-provider="${CSS.escape(targetProvider)}"]`)
                     || query('.edit-contact-tts-provider-input');
                 if (currentInput) currentInput.value = selectedVoice;
+                syncVolcPoolSelection();
             }
         });
+
+        const volcPoolSelect = query('#edit-contact-volc-pool-select');
+        const volcVoiceInput = query('.edit-contact-tts-provider-input[data-provider="volcengine"]');
+        volcPoolSelect?.addEventListener('change', (e) => {
+            const selectedVoice = String(e.target.value || '').trim();
+            if (selectedVoice && volcVoiceInput) volcVoiceInput.value = selectedVoice;
+        });
+        const syncVolcPoolSelection = () => {
+            if (!volcPoolSelect) return;
+            volcPoolSelect.value = String(volcVoiceInput?.value || '').trim();
+            if (volcPoolSelect.selectedIndex < 0) volcPoolSelect.value = '';
+        };
+        volcVoiceInput?.addEventListener('input', syncVolcPoolSelection);
+        volcVoiceInput?.addEventListener('change', syncVolcPoolSelection);
 
         const getAlbumImagePicker = () => {
             if (!this._albumImagePicker) {
@@ -1014,6 +1083,7 @@ export class ContactsView {
         };
 
         const applySelectedAvatar = async (nextAvatar, successMessage) => {
+            if (this.app.wechatData.getContact(safeContactId) !== contact) throw new Error('当前会话已切换，请重新选择头像');
             const safeNextAvatar = String(nextAvatar || '').trim();
             if (!safeNextAvatar) throw new Error('头像路径无效');
 
@@ -1068,8 +1138,13 @@ export class ContactsView {
                 return;
             }
             try {
-                await applySelectedAvatar(image.path, '已复用相册中的头像');
+                const cropper = new ImageCropper({ title: '裁剪好友头像', aspectRatio: 1, outputWidth: 512, outputHeight: 512 });
+                const croppedImage = await cropper.openUrl(image.path);
+                const uploadedAvatar = await window.VirtualPhone?.imageManager?.uploadDataUrl?.(croppedImage, 'contact_avatar');
+                if (!uploadedAvatar) throw new Error('图片上传管理器未初始化');
+                await applySelectedAvatar(uploadedAvatar, '相册头像已裁剪并保存');
             } catch (err) {
+                if (String(err?.message || '') === '用户取消') return;
                 console.warn('复用相册头像失败:', err);
                 this.app.phoneShell.showNotification('更换失败', err?.message || '头像更换失败', '❌');
             }

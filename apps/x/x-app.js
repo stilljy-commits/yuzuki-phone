@@ -3,8 +3,8 @@
  *  X app controller - visual prototype
  * ======================================================== */
 
-import { XData } from './x-data.js?v=20261005-x-post-menu-auto-width';
-import { XView } from './x-view.js?v=20261005-x-post-menu-auto-width';
+import { XData } from './x-data.js?v=20261010-publish-guard';
+import { XView } from './x-view.js?v=20261010-publish-guard';
 
 export class XApp {
     constructor(phoneShell, storage) {
@@ -35,7 +35,7 @@ export class XApp {
         const link = document.createElement('link');
         link.id = 'xapp-css';
         link.rel = 'stylesheet';
-        link.href = new URL('./x.css?v=20261005-x-post-menu-auto-width', import.meta.url).href;
+        link.href = new URL('./x.css?v=20261010-publish-guard', import.meta.url).href;
         document.head.appendChild(link);
     }
 
@@ -72,6 +72,7 @@ export class XApp {
             event.detail.handled = true;
         }
 
+        if (this.view.closeAIParseFailure?.()) return true;
         if (this.view.closePostMenu()) return true;
         if (this.view.closeForwardDialog()) return true;
 
@@ -102,6 +103,7 @@ export class XApp {
     }
 
     clearCache() {
+        this.view.closeAIParseFailure?.();
         this.view.closePostMenu();
         this.view.closeForwardDialog();
         this.xData.clearCache();
@@ -112,6 +114,7 @@ export class XApp {
         this.view.composeReturnPage = 'home';
         this.view.pendingComposeImages = [];
         this.view.composeUploadInProgress = false;
+        this.view.composePublishInProgress = false;
         this.view.composeSessionId += 1;
         this.view.currentReplyCommentId = null;
         this.view.activeDirectMessageId = null;
@@ -123,6 +126,7 @@ export class XApp {
     }
 
     destroy() {
+        this.view.closeAIParseFailure?.();
         this.view.closePostMenu();
         this.view.closeForwardDialog();
         this.view._sendingDirectMessageThreadIds?.clear?.();
