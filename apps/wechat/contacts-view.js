@@ -15,8 +15,9 @@
 import { ImageCropper } from '../settings/image-cropper.js?v=20261018-integration';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
-import { ContactProfileView } from './contact-profile.js?v=20261018-integration';
-import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-picker';
+import { ContactProfileView } from './contact-profile.js?v=20261020-local-library';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261020-local-library';
+import { sortVoicePoolByUsage } from '../../config/voice-pool-usage.js?v=20261020-local-library';
 
 export class ContactsView {
     constructor(wechatApp) {
@@ -163,13 +164,13 @@ export class ContactsView {
             const pool = typeof raw === 'string' ? JSON.parse(raw) : raw;
             if (!Array.isArray(pool)) return [];
             const seen = new Set();
-            return pool.flatMap(item => {
+            return sortVoicePoolByUsage(pool.flatMap(item => {
                 if (!item || typeof item !== 'object') return [];
                 const id = String(item.id || '').trim();
                 if (!id || seen.has(id)) return [];
                 seen.add(id);
                 return [{ id, label: String(item.label || '').trim(), gender: item.gender === 'f' ? '女' : (item.gender === 'm' ? '男' : '中性') }];
-            });
+            }), this.app.wechatData);
         } catch (e) {
             console.warn('读取豆包音色池失败:', e);
             return [];
@@ -189,11 +190,11 @@ export class ContactsView {
         return `<details class="wechat-voice-picker" id="edit-contact-volc-picker">
             <summary><span id="edit-contact-volc-picker-summary">浏览导入音色池</span><span>${pool.length} 款音色</span></summary>
             <div class="wechat-voice-picker-body">
-                <div class="wechat-voice-picker-empty">同一段约50字的文本：陈述、开心、生气。点击试听会产生合成用量。</div>
+                <div class="wechat-voice-picker-empty">优先本地试听，仅缺少音频时生成约49字。未使用的排在前面；人数含已保存绑定与自动分配，同一人物只计一次。批量生成和下载请到设置 → 语音 → 豆包音色池。</div>
                 <input type="search" id="edit-contact-volc-pool-search" aria-label="搜索导入音色" placeholder="搜索名称或音色 ID">
                 <div class="wechat-voice-picker-list" role="region" aria-label="导入音色选择列表">
                     ${pool.map((item, index) => `<div class="wechat-voice-picker-row" data-voice-index="${index}">
-                        <div class="wechat-voice-picker-info"><div class="wechat-voice-picker-name">${this._escapeHtml(item.label || item.id)}</div><div class="wechat-voice-picker-id">${this._escapeHtml(item.gender)} · ${this._escapeHtml(item.id)}</div></div>
+                        <div class="wechat-voice-picker-info"><div class="wechat-voice-picker-name">${this._escapeHtml(item.label || item.id)} <span title="${this._escapeAttr((item.usedBy || []).join('、') || '当前作品无人使用')}" style="font-size:11px;color:${item.usageCount ? '#c07720' : '#259b58'};">${item.usageCount || 0}人</span></div><div class="wechat-voice-picker-id">${this._escapeHtml(item.gender)} · ${this._escapeHtml(item.id)}</div></div>
                         <button type="button" data-voice-preview="${index}" aria-label="试听 ${this._escapeAttr(item.label || item.id)}" aria-pressed="false">试听</button>
                         <button type="button" data-voice-use="${index}" aria-label="使用 ${this._escapeAttr(item.label || item.id)}" aria-pressed="false">使用</button>
                     </div>`).join('')}
@@ -1129,7 +1130,7 @@ export class ContactsView {
             isActive: () => isVoicePreviewViewActive(currentView) && ttsFold?.classList.contains('is-open'),
             watchActive: onChange => watchVoicePreviewView(currentView, onChange),
             onState: ({ state, options: selected, error }) => {
-                if (previewStatus) previewStatus.textContent = error || (state === 'loading' ? `正在生成${selected.label}试听…` : state === 'playing' ? `正在试听${selected.label}，可点“停止”结束。` : '试听不会选择音色；满意后点“使用”，再保存。');
+                if (previewStatus) previewStatus.textContent = error || (state === 'loading' ? `正在准备${selected.label}试听，优先读取本地…` : state === 'playing' ? `正在试听${selected.label}（${selected.source === 'local' ? '本地音频，无合成用量' : '新生成，已缓存'}${selected.persistent === false ? '，仅本次会话' : ''}），可点“停止”结束。` : '试听不会选择音色；满意后点“使用”，再保存。');
             },
             onError: error => this.app.phoneShell.showNotification('试听失败', error.message, '⚠️')
         });

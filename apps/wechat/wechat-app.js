@@ -11,9 +11,10 @@
  * ======================================================== */
 // 微信APP主程序
 import { ChatView } from './chat-view.js?v=20261019-voice-preview';
-import { ContactsView } from './contacts-view.js?v=20261019-voice-picker';
+import { ContactsView } from './contacts-view.js?v=20261020-local-library';
+import { readImportantCharacterDatabase } from './character-database.js?v=20261020-local-library';
 import { MomentsView } from './moments-view.js?v=20261004-moments-image-cancel';
-import { WechatData } from './wechat-data.js?v=20261019-voice-preview';
+import { WechatData } from './wechat-data.js?v=20261020-local-library';
 import { getWalletAssetTotals, parseWalletAssetEvaluation } from './wallet-assets.js?v=20261011-wallet-credit-repayment';
 import { ImageCropper } from '../settings/image-cropper.js?v=20261018-integration';
 import { formatWechatChatListTime } from './chat-list-time.js?v=20260717-wechat-list-time';
@@ -9230,10 +9231,13 @@ export class WechatApp {
                     <div style="width: 60px; height: 60px; border-radius: 50%; background: rgba(255,255,255,0.6); backdrop-filter: blur(10px); border: 1px solid rgba(0,0,0,0.1); margin: 0 auto 20px; display: flex; align-items: center; justify-content: center;">
                         <i class="fa-solid fa-robot" style="font-size: 28px; color: #666;"></i>
                     </div>
-                    <div style="font-size: 16px; font-weight: 500; color: #000; margin-bottom: 8px;">使用AI生成联系人</div>
+                    <div style="font-size: 16px; font-weight: 500; color: #000; margin-bottom: 8px;">智能补全联系人</div>
                     <div style="font-size: 12px; color: #999; margin-bottom: 24px; line-height: 1.5;">
-                        将使用AI分析当前角色卡和聊天记录，智能生成联系人。
+                        优先读取当前作品数据库的“重要角色表”。直接补全可带入人物详细资料，不调用AI；AI补全会参考数据库与近期聊天生成联系人、群聊和时间。无数据库时改用角色卡、微信世界书、最近30条聊天及较早记录抽样。
                     </div>
+
+                    <div id="wechat-database-status" role="status" style="font-size:12px;color:#777;line-height:1.6;margin-bottom:12px;">正在检查重要角色表…</div>
+                    <button type="button" id="load-from-character-database" disabled style="width:100%;padding:10px;margin-bottom:12px;border:1px solid #b7dfc9;border-radius:8px;background:#effaf4;color:#218a52;font-size:12px;cursor:pointer;">从数据库直接补全（免AI）</button>
 
                     <button id="confirm-load" style="
                         padding: 10px 20px;
@@ -9244,7 +9248,7 @@ export class WechatApp {
                         border-radius: 8px;
                         font-size: 12px;
                         cursor: pointer;
-                    ">开始生成</button>
+                    ">AI补全联系人与群聊</button>
 
                 </div>
             </div>
@@ -9252,15 +9256,36 @@ export class WechatApp {
     `;
 
         this.phoneShell.setContent(html);
+        const databaseButton = document.getElementById('load-from-character-database');
+        const databaseStatus = document.getElementById('wechat-database-status');
+        const loadingData = this.wechatData;
+        void readImportantCharacterDatabase().then(database => {
+            if (!databaseButton?.isConnected || loadingData !== this.wechatData) return;
+            databaseStatus.textContent = database.message;
+            databaseButton.disabled = !database.characters.length;
+            if (database.characters.length) databaseButton.textContent = `从数据库补全 ${database.characters.length} 人（免AI）`;
+        });
+        databaseButton?.addEventListener('click', async () => {
+            const aiButton = document.getElementById('confirm-load');
+            if (databaseButton.disabled || aiButton?.dataset.loading === '1') return;
+            databaseButton.disabled = true; if (aiButton) aiButton.disabled = true;
+            databaseStatus.textContent = '正在读取人物资料并合并联系人…';
+            const result = await loadingData.loadContactsFromDatabase();
+            if (!databaseButton.isConnected || loadingData !== this.wechatData) return;
+            databaseStatus.textContent = result.message;
+            databaseButton.disabled = false; if (aiButton) aiButton.disabled = false;
+            this.phoneShell.showNotification(result.success ? '数据库补全完成' : '未能补全', result.message, result.success ? '✅' : '⚠️');
+        });
 
         document.getElementById('back-from-load')?.addEventListener('click', () => {
             this.render();
         });
 
         document.getElementById('confirm-load')?.addEventListener('click', async () => {
-            const shouldClear = confirm('智能加载联系人前，是否先清空当前微信里的所有联系人、群聊和聊天记录？\n\n点击“确定”会先清空再生成，避免重复联系人/群聊；点击“取消”则保留现有数据并继续追加补全。');
             const confirmBtn = document.getElementById('confirm-load');
             if (confirmBtn?.dataset?.loading === '1') return;
+            const shouldClear = confirm('是否在生成成功后替换当前微信里的所有联系人、群聊和聊天记录？\n\n点击“确定”会在成功后清空再写入；点击“取消”则保留现有数据并继续追加补全。生成失败不会清空。');
+            const generationData = this.wechatData;
             document.getElementById('wechat-contact-generation-error-modal')?.remove();
             if (confirmBtn) {
                 confirmBtn.dataset.loading = '1';
@@ -9272,11 +9297,8 @@ export class WechatApp {
             this.phoneShell.showNotification('AI分析中', '正在生成联系人...', '⏳');
 
             try {
-                if (shouldClear) {
-                    this.wechatData.clearContactsAndGroupsForSmartLoad?.();
-                }
-
-                const result = await this.wechatData.loadContactsFromCharacter();
+                const result = await generationData.loadContactsFromCharacter({ replaceExisting: shouldClear });
+                if (this.wechatData !== generationData || !confirmBtn?.isConnected) return;
 
                 if (result.success) {
                     let message = result.message;

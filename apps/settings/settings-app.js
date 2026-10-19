@@ -12,7 +12,9 @@
 // 设置APP
 import { ImageUploadManager } from './image-upload.js?v=20261006-story-upload-console-cleanup';
 import { ImageCropper } from './image-cropper.js';
-import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261019-voice-picker';
+import { TtsVoicePreview, isVoicePreviewViewActive, watchVoicePreviewView } from '../../config/tts-preview.js?v=20261020-local-library';
+import { sortVoicePoolByUsage } from '../../config/voice-pool-usage.js?v=20261020-local-library';
+import { renderPreviewLibraryControls, bindPreviewLibraryControls } from '../../config/tts-preview-library-view.js?v=20261020-local-library';
 import { AlbumData } from '../album/album-data.js';
 import { AlbumImagePicker } from '../album/album-image-picker.js';
 import { DEFAULT_APP_ICONS, PHONE_CONFIG } from '../../config/apps.js';
@@ -3494,7 +3496,9 @@ export class SettingsApp {
                                             <div style="font-size: 13px; font-weight: 700; color: #333;">音色池</div>
                                             <span id="phone-tts-volc-pool-stats" style="font-size: 11px; color: #999;"></span>
                                         </div>
+                                        <div class="setting-desc" style="margin-bottom:8px;">按当前作品使用人数升序排列，未使用的优先。含已保存的豆包绑定与自动分配，同一人物只计一次。</div>
                                         <div id="phone-tts-volc-pool-list" style="max-height: 240px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px;"></div>
+                                        ${renderPreviewLibraryControls()}
                                         <button id="phone-tts-volc-pool-clear" style="width: 100%; height: 30px; margin-top: 8px; border: 1px solid #ffd6d6; border-radius: 8px; background: #fff; color: #ff3b30; font-size: 12px; cursor: pointer;">清空音色池</button>
                                     </div>
                                     <div class="setting-item">
@@ -10484,9 +10488,11 @@ export class SettingsApp {
             input.addEventListener('input', () => voicePreview.stop());
             input.addEventListener('change', () => voicePreview.stop());
         });
-        const playTtsPreview = (provider, voice, button) => {
+        const playTtsPreview = async (provider, voice, button) => {
             const isNimoVoiceClone = provider === 'nimo' && String(ttsModel?.value || '').trim() === 'mimo-v2.5-tts-voiceclone';
-            return voicePreview.play({ provider, voice, requestTimeoutMs: isNimoVoiceClone ? 120000 : 30000, playbackTimeoutMs: isNimoVoiceClone ? 20000 : 10000 }, button);
+            const result = await voicePreview.play({ provider, voice, requestTimeoutMs: isNimoVoiceClone ? 120000 : 30000, playbackTimeoutMs: isNimoVoiceClone ? 20000 : 10000 }, button);
+            void previewLibraryControls?.refresh();
+            return result;
         };
         const saveTtsGenderFallback = async (gender, providerEl, voiceEl) => {
             const safeGender = String(gender || '').trim() === 'male' ? 'male' : 'female';
@@ -11062,17 +11068,19 @@ export class SettingsApp {
                 listEl.innerHTML = '<div style="padding: 14px 10px; text-align: center; color: #999; font-size: 12px;">音色池为空：把音色批量粘贴到上方文本框后点「导入」</div>';
                 return;
             }
-            listEl.innerHTML = pool.map((v, i) => `
+            listEl.innerHTML = sortVoicePoolByUsage(pool, getWechatData()).map((v) => {
+                const i = v.sourceIndex;
+                return `
                 <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f5f5f5; font-size: 12px;">
                     <div style="flex: 1; min-width: 0;">
-                        <div style="color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtml(v.label || v.id)}</div>
+                        <div style="color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtml(v.label || v.id)} <span title="${this._escapeHtml(v.usedBy.join('、') || '当前作品无人使用')}" style="font-size:11px;color:${v.usageCount ? '#c07720' : '#259b58'};">${v.usageCount}人</span></div>
                         <div style="color: #bbb; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace;">${this._escapeHtml(v.id)}</div>
                     </div>
                     <button type="button" data-pool-preview="${i}" aria-label="试听 ${this._escapeHtml(v.label || v.id)}" aria-pressed="false" style="flex-shrink:0;padding:3px 8px;border:1px solid #d8e3ef;border-radius:5px;background:#f2f7ff;color:#576b95;font-size:11px;cursor:pointer;">试听</button>
                     <span data-pool-gender="${i}" style="flex-shrink: 0; padding: 2px 8px; border-radius: 6px; background: ${v.gender === 'f' ? '#ffe3ec' : (v.gender === 'm' ? '#e3edff' : '#efefef')}; color: #666; font-size: 11px; cursor: pointer;">${volcGenderLabel(v.gender)}</span>
                     <span data-pool-del="${i}" style="flex-shrink: 0; color: #ff3b30; font-size: 11px; cursor: pointer;">删除</span>
                 </div>
-            `).join('');
+            `; }).join('');
         };
 
         const renderVolcPoolRoles = () => {
@@ -11084,10 +11092,13 @@ export class SettingsApp {
                 return;
             }
             const seen = new Set();
+            const seenNames = new Set();
             const roles = [];
             for (const c of [...(wechatData.data.contacts || []), ...((wechatData.data.chats || []).filter(c => c && c.type !== 'group'))]) {
-                if (!c || seen.has(c.id)) continue;
+                const nameKey = String(c?.name || '').replace(/\s+/g, '').toLowerCase();
+                if (!c || seen.has(c.id) || seenNames.has(nameKey)) continue;
                 seen.add(c.id);
+                seenNames.add(nameKey);
                 roles.push(c);
             }
             if (!roles.length) {
@@ -11096,7 +11107,7 @@ export class SettingsApp {
             }
             rolesEl.innerHTML = roles.map((c) => {
                 let resolved = null;
-                try { resolved = wechatData.resolveTtsVoiceByName?.(c.name, { includeChats: false }) || null; } catch (e) { resolved = null; }
+                try { resolved = wechatData.resolveTtsVoiceByName?.(c.name, { includeChats: true, persistAutoPick: false }) || null; } catch (e) { resolved = null; }
                 const voice = String(resolved?.voice || '').trim();
                 const isAuto = !!(resolved && resolved.autoAssigned);
                 const bound = !!voice && !isAuto && resolved?.provider === 'volcengine';
@@ -11114,13 +11125,17 @@ export class SettingsApp {
             }).join('');
         };
 
-        const renderVolcPoolAll = () => { renderVolcPoolList(); renderVolcPoolRoles(); };
+        let previewLibraryControls;
+        const renderVolcPoolAll = () => { renderVolcPoolList(); renderVolcPoolRoles(); void previewLibraryControls?.refresh(); };
         renderVolcPoolAll();
+        previewLibraryControls = bindPreviewLibraryControls(ttsPreviewRoot, { getPool: readVolcPool,
+            getManager: () => window.VirtualPhone?.ttsManager, stopPreview: () => voicePreview.stop() });
 
         const volcAutoAssignToggle = document.getElementById('phone-tts-volc-auto-assign');
         if (volcAutoAssignToggle) {
             volcAutoAssignToggle.addEventListener('change', async (e) => {
                 await this.storage.set('phone-tts-volc-auto-assign', e.target.checked ? '1' : '0');
+                renderVolcPoolAll();
                 this.phoneShell.showNotification('自动分配', e.target.checked ? '已开启：未绑定音色的联系人将自动分配' : '已关闭', '🎙️');
             });
         }
@@ -11200,7 +11215,7 @@ export class SettingsApp {
                 return;
             }
             await this.storage.set(VOLC_PICK_KEY, '{}');
-            renderVolcPoolRoles();
+            renderVolcPoolAll();
             this.phoneShell.showNotification('重新分配', '已清除分配记录：各角色将按当前音色池重新自动分配', '🎲');
         });
 

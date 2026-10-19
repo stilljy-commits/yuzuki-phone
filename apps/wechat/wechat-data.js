@@ -13,6 +13,8 @@
 import { GlobalSocialStore } from '../../config/global-social-store.js';
 import { parseImagePromptDescriptionPair, readBalancedImagePromptGroup } from '../../config/image-prompt-format.js';
 import { parseWechatVoiceContent } from './voice-text.js?v=20261019-voice-preview';
+import { sampleContactText, buildContactHistory, getContactGenerationScope } from './contact-generation-context.js?v=20261020-local-library';
+import { readImportantCharacterDatabase, formatCharacterDatabaseContext, databaseCharacterProfile } from './character-database.js?v=20261020-local-library';
 import {
     createWalletCreditBillingState,
     getWalletCreditBillingStatus,
@@ -3102,7 +3104,7 @@ export class WechatData {
         return null;
     }
 
-    resolveTtsVoiceByName(name, { includeChats = true } = {}) {
+    resolveTtsVoiceByName(name, { includeChats = true, persistAutoPick = true } = {}) {
         const contact = this.findContactByNameLoose(name, { includeChats });
         const globalProvider = String(this.storage?.get?.('phone-tts-provider') || 'minimax_cn').trim() || 'minimax_cn';
         const boundProvider = String(contact?.ttsProvider || '').trim();
@@ -3117,7 +3119,7 @@ export class WechatData {
         let voice = baseVoice;
         let autoAssignedVoice = '';
         if (!voice && provider === 'volcengine') {
-            autoAssignedVoice = this._resolveVolcPoolAutoVoice(contact, name);
+            autoAssignedVoice = this._resolveVolcPoolAutoVoice(contact, name, { persist: persistAutoPick });
             if (autoAssignedVoice) voice = autoAssignedVoice;
         }
         return {
@@ -3178,7 +3180,7 @@ export class WechatData {
         return candidates[this._volcPoolHash(String(name || '')) % candidates.length].id;
     }
 
-    _resolveVolcPoolAutoVoice(contact, name) {
+    _resolveVolcPoolAutoVoice(contact, name, { persist = true } = {}) {
         try {
             if (String(this.storage?.get?.('phone-tts-volc-auto-assign') ?? '1') === '0') return '';
             // 不给"我自己"自动分配（用户自己有专属配置入口）
@@ -3201,7 +3203,7 @@ export class WechatData {
             const picked = this._volcPoolPick(safeName, gender, pool);
             if (!picked) return '';
             pins[key] = { v: picked, g: gender };
-            Promise.resolve(this.storage?.set?.('phone-tts-volc-auto-pick', JSON.stringify(pins))).catch(() => {});
+            if (persist) Promise.resolve(this.storage?.set?.('phone-tts-volc-auto-pick', JSON.stringify(pins))).catch(() => {});
             return picked;
         } catch (e) {
             console.warn('⚠️ 豆包音色池自动分配失败:', e);
@@ -4215,8 +4217,41 @@ getWeekday(date) {
         return true;
     }
     
+    // Important-character table import: no AI and no clearing of existing chats.
+    async loadContactsFromDatabase() {
+        try {
+            const context = globalThis.SillyTavern?.getContext?.();
+            if (!context) throw new Error('无法获取当前作品。');
+            if (this._buildLobbyLinkSelection(context).isLobby) throw new Error('请先打开目标作品的聊天，再读取该作品的重要角色表。');
+            const scope = getContactGenerationScope(context), originalData = this.data;
+            const database = await readImportantCharacterDatabase();
+            if (this.data !== originalData || getContactGenerationScope(SillyTavern.getContext()) !== scope) throw new Error('已切换作品或聊天，本次资料未写入。');
+            if (!database.characters.length) throw new Error(database.message);
+            const selfNames = new Set([context.name1, this.data.userInfo?.name].filter(Boolean).map(name => this._normalizeLookupName(name)));
+            let added = 0, updated = 0, skipped = 0;
+            for (const character of database.characters) {
+                if (selfNames.has(this._normalizeLookupName(character.name))) { skipped++; continue; }
+                let contact = this.findContactAliasConflict([character.name]);
+                if (!contact) {
+                    contact = { id: `contact_${Date.now()}_${Math.random()}`, name: character.name, gender: character.gender,
+                        avatar: '', remark: '', relation: '', letter: this.getFirstLetter(character.name) };
+                    this.data.contacts.push(contact); added++;
+                } else updated++;
+                this._applyDatabaseCharacterProfile(contact, character);
+            }
+            await this.saveData();
+            return { success: true, count: added, message: `已从重要角色表新增${added}人、合并${updated}人${skipped ? `，跳过自己${skipped}项` : ''}。未调用AI，已有聊天和手动详情保留。${database.warning || ''}` };
+        } catch (error) { return { success: false, message: error.message }; }
+    }
+
+    _applyDatabaseCharacterProfile(contact, character) {
+        if (!contact || !character) return;
+        if (this._normalizeGenderValue(contact.gender) === 'unknown' && character.gender !== 'unknown') contact.gender = character.gender;
+        if (!contact.detailedProfile || contact.detailedProfile.origin !== 'manual') contact.detailedProfile = databaseCharacterProfile(character);
+    }
+
  // ✅ 智能加载联系人（调用AI）
-async loadContactsFromCharacter() {
+async loadContactsFromCharacter({ replaceExisting = false } = {}) {
     let aiResponse = '';
     try {
         // 🔑 定义 context
@@ -4227,14 +4262,24 @@ async loadContactsFromCharacter() {
         if (!context) {
             return { success: false, message: '❌ 无法获取SillyTavern上下文' };
         }
-        
+        const originalData = this.data;
+        const scope = getContactGenerationScope(context);
+        const assertCurrent = () => {
+            if (this.data !== originalData || getContactGenerationScope(SillyTavern.getContext()) !== scope) {
+                throw new Error('已切换作品或聊天，本次结果未写入，请回到目标聊天后重试。');
+            }
+        };
         
         // ✅ 构建AI消息
-        const messages = await this.buildContactPrompt(context);
+        const database = this._buildLobbyLinkSelection(context).isLobby ? { characters: [] } : await readImportantCharacterDatabase();
+        assertCurrent();
+        const messages = await this.buildContactPrompt(context, { database });
+        assertCurrent();
         
         
         // ✅ 调用AI
         aiResponse = await this.sendToAI(messages);
+        assertCurrent();
         
         if (!aiResponse) {
             throw new Error('AI未返回数据');
@@ -4247,6 +4292,8 @@ async loadContactsFromCharacter() {
         if (!generatedData || !generatedData.contacts) {
             throw new Error('AI返回的数据格式错误');
         }
+        // Only replace after a valid response, so an API/format failure keeps the old data.
+        if (replaceExisting) this.clearContactsAndGroupsForSmartLoad();
         
         // 🔒 幂等保护：已存在的好友/群绝不覆盖，仅新增不存在的
         const normalizeName = (raw) => {
@@ -4296,6 +4343,8 @@ async loadContactsFromCharacter() {
                 gender: contact?.gender || ''
             });
             if (result?.created) addedCount++;
+            const databaseCharacter = database.characters.find(c => normalizeName(c.name) === normalizeName(result?.contact?.name));
+            if (databaseCharacter) this._applyDatabaseCharacterProfile(result.contact, databaseCharacter);
             const parsedGender = this._normalizeGenderValue(contact?.gender);
             if (result?.contact && parsedGender !== 'unknown') {
                 const currentGender = this.getContactGender(result.contact.id || result.contact.name);
@@ -4420,8 +4469,9 @@ async loadContactsFromCharacter() {
 }
     
 // 🔧 构建联系人生成提示词（重构版）
-async buildContactPrompt(context) {
-    const charName = context?.name2 || context?.name || '角色';
+async buildContactPrompt(context, { database = null } = {}) {
+    database = database || await readImportantCharacterDatabase();
+    const charName = context?.name2 || context?.characters?.[context.characterId]?.data?.name || context?.name || '角色';
     const lobbySelection = this._buildLobbyLinkSelection(context);
     const lobbyUsers = this._resolveLobbySelectedUsers(lobbySelection);
     const lobbyUserProfiles = await this._resolveLobbySelectedUserProfiles(lobbySelection, context);
@@ -4431,12 +4481,12 @@ async buildContactPrompt(context) {
         ? context.characters[context.characterId]
         : null;
 
-    const description = this._truncateAiContextText(char?.description, 2400);
-    const personality = this._truncateAiContextText(char?.personality, 1200);
-    const scenario = this._truncateAiContextText(context?.scenario || char?.scenario, 1600);
-    const systemPrompt = this._truncateAiContextText(char?.data?.system_prompt || char?.system_prompt, 800);
-    const mesExample = this._truncateAiContextText(char?.mes_example || char?.data?.mes_example, 1000);
-    const firstMes = this._truncateAiContextText(char?.first_mes || char?.data?.first_mes, 600);
+    const description = sampleContactText(char?.description || char?.data?.description, 10000);
+    const personality = sampleContactText(char?.personality || char?.data?.personality, 2400);
+    const scenario = sampleContactText(context?.scenario || char?.scenario || char?.data?.scenario, 3600);
+    const systemPrompt = sampleContactText(char?.data?.system_prompt || char?.system_prompt, 1600);
+    const mesExample = sampleContactText(char?.mes_example || char?.data?.mes_example, 1800);
+    const firstMes = sampleContactText(char?.first_mes || char?.data?.first_mes, 1600);
 
     let persona = '';
     const personaTextarea = document.getElementById('persona_description');
@@ -4454,29 +4504,10 @@ async buildContactPrompt(context) {
         }
     }
 
-    let chatHistory = '';
-    if (Array.isArray(context?.chat) && context.chat.length > 0) {
-        const isLobbySystemNoise = (msg, cleanText) => {
-            if (!lobbySelection.isLobby) return false;
-            if (msg?.is_user) return false;
-            const text = String(cleanText || '').trim();
-            if (!text) return true;
-            if (text.includes('API 连接') && text.includes('角色管理') && text.includes('扩展程序')) return true;
-            if (/如果您已连接到一个\s*API/.test(text)) return true;
-            if (/将角色设为欢迎页面的助手/.test(text)) return true;
-            return false;
-        };
-
-        const lines = [];
-        context.chat.forEach((msg) => {
-            const rawText = msg?.mes || msg?.content || '';
-            const cleanText = String(rawText).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-            if (isLobbySystemNoise(msg, cleanText)) return;
-            const speaker = msg?.is_user ? userName : charName;
-            lines.push(`${speaker}: ${cleanText.substring(0, 180)}`);
-        });
-        chatHistory = lines.slice(-10).join('\n');
-    }
+    // A populated current-chat database replaces distant history as the primary source.
+    const useDatabase = !lobbySelection.isLobby && database.characters.length > 0;
+    const historyContext = useDatabase ? { ...context, chat: (Array.isArray(context.chat) ? context.chat : []).slice(-10) } : context;
+    const history = buildContactHistory(historyContext, { userName, charName, isLobby: lobbySelection.isLobby, databaseAvailable: useDatabase });
 
     const promptManager = window.VirtualPhone?.promptManager;
     if (!promptManager) {
@@ -4494,6 +4525,7 @@ async buildContactPrompt(context) {
     const messages = [];
 
     await window.VirtualPhone?.worldbookManager?.appendWorldbookMessages?.(messages, 'wechat');
+    if (useDatabase) messages.push({ role: 'system', content: formatCharacterDatabaseContext(database) });
 
     const charCardParts = [
         `【当前主角角色卡】`,
@@ -4512,7 +4544,7 @@ async buildContactPrompt(context) {
 
     messages.push({
         role: 'system',
-        content: `【最近聊天记录】\n${chatHistory || '暂无聊天记录'}`
+        content: `【聊天记录节选】共${history.total}条有效记录；最近${history.recent}条，加较早${history.older}条抽样。长消息分段节选，未出现不代表人物不存在。\n${history.text || '暂无聊天记录'}`
     });
 
     messages.push({
@@ -4555,9 +4587,10 @@ async buildContactPrompt(context) {
     const lobbyHardRule = lobbySelection.isLobby
         ? '\n\n【大厅模式硬规则】\n当前是大厅模式。请将上面所有char信息创建联系人，不得遗漏。不需要为user创建其他联系人。'
         : '';
+    const coverageRule = lobbySelection.isLobby ? '' : `\n\n【主要人物覆盖核对】\n已知角色卡/发言人候选（逐一核对是否为实际人物，故事标题、旁白不要当人名）：${history.candidates.join('、') || '无'}\n当前通讯录（用于合并同一人物、识别别名）：${(this.data.contacts || []).map(c => c.name).join('、').slice(0, 4000) || '空'}\n先从角色卡、世界书和全部聊天节选梳理主要人物：当前正在互动、反复登场、与用户有直接关系的人物优先。不能只看最近几句，不能用泛称同学/朋友或临时编造的路人替代已知主要人物。只要有明确社交关系或直接互动证据，即使角色较早登场也应列入；群成员若同时满足好友条件，也要单独列入好友段。别名与本名合并，不得重复造人。不为凑满好友/群数量虚构人物；没有依据的群可以留空。最终输出前逐一核对主要人物是否遗漏，保留原有初始化标签格式。`;
     messages.push({
         role: 'user',
-        content: `${loadContactsPrompt}${lobbyHardRule}`
+        content: `${loadContactsPrompt}${coverageRule}${lobbyHardRule}`
     });
     return messages;
 }

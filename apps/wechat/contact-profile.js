@@ -74,7 +74,7 @@ export function formatContactProfileText(profile) {
 
 function savedProfile(contact) {
     return normalizeContactProfile(contact?.detailedProfile, {
-        origin: contact?.detailedProfile?.origin === 'manual' ? 'manual' : 'ai',
+        origin: ['manual', 'database'].includes(contact?.detailedProfile?.origin) ? contact.detailedProfile.origin : 'ai',
         now: Number(contact?.detailedProfile?.updatedAt) || Date.now()
     });
 }
@@ -166,7 +166,7 @@ export class ContactProfileView {
         button.disabled = pending || !!this.current?.editing;
         button.textContent = pending ? '生成中…' : (contact.detailedProfile ? '刷新资料' : '生成资料');
         const status = root.querySelector('#contact-profile-status');
-        status.textContent = error || (pending ? '正在根据角色卡、所选世界书和最近剧情整理资料…' : contact.detailedProfile ? `${contact.detailedProfile.origin === 'manual' ? '手动编辑' : 'AI 整理'} · 已保存，可随时补充或刷新` : '首次查看时自动整理一次；也可以直接手动填写。');
+        status.textContent = error || (pending ? '正在根据角色卡、所选世界书和最近剧情整理资料…' : contact.detailedProfile ? `${contact.detailedProfile.origin === 'manual' ? '手动编辑' : contact.detailedProfile.origin === 'database' ? '数据库资料' : 'AI 整理'} · 已保存，可随时补充或刷新` : '首次查看时自动整理一次；也可以直接手动填写。');
         if (this.current?.editing) return;
         const profile = savedProfile(contact) || buildContactProfileSeed(contact);
         root.querySelector('#contact-profile-body').innerHTML = profile ? `${profile.summary ? `<p style="margin:0 0 14px;line-height:1.6;white-space:pre-wrap;">${escapeHtml(profile.summary)}</p>` : ''}${profile.fields.map(item => `<div class="wechat-profile-field"><div class="wechat-profile-field-label">${escapeHtml(item.label)}</div><div class="wechat-profile-field-value">${escapeHtml(item.value)}</div></div>`).join('')}` : '<div style="color:#999;font-size:13px;">暂无详细资料</div>';

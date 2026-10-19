@@ -38,11 +38,11 @@ import {
 } from './apps/mofo/mofo-renderer.js';
 
 const ST_PHONE_BASE_URL = new URL('./', import.meta.url).href;
-const ST_PHONE_VERSION = '1.6.3-p4';
+const ST_PHONE_VERSION = '1.6.3-p5';
 const ST_PHONE_CSS_REVISION = '20261019-voice-picker';
 const ST_PHONE_APP_SWIPE_REVISION = '20261002-wechat-chat-return';
 const ST_PHONE_ALBUM_MODULE_REVISION = '20261006-story-image-outside-close';
-const ST_PHONE_WECHAT_MODULE_REVISION = '20261019-voice-picker';
+const ST_PHONE_WECHAT_MODULE_REVISION = '20261020-local-library';
 const ST_PHONE_WEIBO_MODULE_REVISION = '20261002-first-return-guard';
 const ST_PHONE_X_MODULE_REVISION = '20261010-publish-guard';
 const ST_PHONE_HONEY_ASSET_REVISION = '20261003-theme-media-recovery';
@@ -147,11 +147,13 @@ const WECHAT_INITIAL_ENABLED_OFFLINE_KEYS = [
 const WECHAT_MESSAGE_SOUND_URL = new URL('./assets/sounds/iphone-message-notification.mp3', ST_PHONE_BASE_URL).href;
 const ST_PHONE_CURRENT_UPDATE = {
     version: ST_PHONE_VERSION,
-    date: '2026-10-19',
+    date: '2026-10-20',
     items: [
-        "【优化】联系人音色池列表支持逐条直接试听，满意后点“使用”，保存后再绑定。",
-        "【优化】所有音色统一使用约50字的短试听文本，包含陈述、开心、生气三种内容，无需切换文案。"
-]
+        "【新增】本地试听库：自动缓存试听，豆包音色池支持批量生成缺少音频、下载 ZIP 和导入复用。",
+        "【优化】音色池显示当前作品使用人数，未使用的优先；统计手动绑定与自动分配，同一人物只计一次。",
+        "【新增】读取龙血玄黄数据库的重要角色表，一键免 AI 补全联系人和详细资料，保留聊天与手动详情。",
+        "【优化】AI 加载联系人优先数据库与近期聊天；无数据库时扩充角色卡和聊天节选，核对主要人物，生成失败不清空数据。"
+    ]
 };
 
 // 🔥 防重复加载检查（放在最前面，避免任何代码执行）

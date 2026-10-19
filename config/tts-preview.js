@@ -1,4 +1,5 @@
-export const TTS_PREVIEW_TEXT = '下午三点，我们在图书馆见。太好了！我就知道你一定能成功！你怎么又失约了？我真的生气了，请认真回答。';
+import { voicePreviewLibrary, TTS_PREVIEW_TEXT } from './tts-preview-library.js?v=20261020-local-library';
+export { TTS_PREVIEW_TEXT };
 
 export function isVoicePreviewViewActive(root) {
     return !!root?.isConnected && root.classList.contains('phone-view-current')
@@ -18,8 +19,8 @@ export function watchVoicePreviewView(root, onChange) {
 export class TtsVoicePreview {
     constructor({ getManager = () => globalThis.window?.VirtualPhone?.ttsManager, isActive = () => true,
         watchActive = null, onState = () => {}, onError = () => {}, createAudio = url => new Audio(url),
-        revokeUrl = url => URL.revokeObjectURL(url) } = {}) {
-        Object.assign(this, { getManager, isActive, watchActive, onState, onError, createAudio, revokeUrl });
+        revokeUrl = url => URL.revokeObjectURL(url), library = typeof window === 'undefined' ? null : voicePreviewLibrary } = {}) {
+        Object.assign(this, { getManager, isActive, watchActive, onState, onError, createAudio, revokeUrl, library });
         this.current = null;
     }
 
@@ -74,7 +75,7 @@ export class TtsVoicePreview {
         if (!this.isActive()) return false;
         const manager = this.getManager();
         if (!manager?.requestTTS) { this.onError(new Error('请先在手机设置中配置语音服务。')); return false; }
-        const ticket = { options, button, buttonText: button?.textContent || '试听', controller: new AbortController(), url: '' };
+        const ticket = { options: { ...options }, button, buttonText: button?.textContent || '试听', controller: new AbortController(), url: '' };
         this.current = ticket;
         const signal = ticket.controller.signal;
         const aborted = new Promise((_, reject) => {
@@ -89,7 +90,11 @@ export class TtsVoicePreview {
         try {
             ticket.unwatch = this.watchActive?.(() => { if (!this._isLive(ticket)) this._finish(ticket); });
             timeout(options.requestTimeoutMs || 30000, '试听生成超时，请重试。');
-            const request = Promise.resolve(manager.requestTTS(TTS_PREVIEW_TEXT, {
+            const request = Promise.resolve(this.library ? this.library.get(manager, { ...options, signal }).then(result => {
+                ticket.options.source = result.source;
+                ticket.options.persistent = result.persistent;
+                return URL.createObjectURL(result.blob);
+            }) : manager.requestTTS(TTS_PREVIEW_TEXT, {
                 provider: options.provider, voice: options.voice, languageBoost: options.languageBoost, signal
             })).then(url => {
                 if (!this._isLive(ticket) || signal.aborted) {
