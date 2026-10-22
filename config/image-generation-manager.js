@@ -32,6 +32,7 @@ export class ImageGenerationManager {
         this._comfyUIResourcesCacheTtl = 5 * 60 * 1000;
         this._csrfToken = null;
         this._csrfTokenPromise = null;
+        this._novelAIVibeEncodingCache = new Map();
     }
 
     _get(key, fallback = '') {
@@ -394,6 +395,7 @@ export class ImageGenerationManager {
                 if (!image) return null;
                 return {
                     image,
+                    encodingModel: String(item?.encodingModel || item?.encoding_model || '').trim(),
                     cacheSecretKey: String(item?.cacheSecretKey || item?.cache_secret_key || '').trim()
                         || this._buildNovelAIReferenceCacheKey(image),
                     strength: this._clampReferenceValue(item?.strength ?? item?.referenceStrength, 0.6, 0, 1),
@@ -434,9 +436,16 @@ export class ImageGenerationManager {
                         const image = typeof item === 'string'
                             ? String(item || '').trim()
                             : String(item?.image || item?.imageData || item?.dataUrl || item?.base64 || item?.imageUrl || item?.url || '').trim();
-                        if (!image) return null;
+                        const encodingPath = typeof item === 'string'
+                            ? ''
+                            : String(item?.encodingPath || item?.encoding_path || '').trim();
+                        if (!image && !encodingPath) return null;
                         return {
                             image,
+                            encodingPath,
+                            encodingHash: String(item?.encodingHash || item?.encoding_hash || '').trim(),
+                            encodingModel: String(item?.encodingModel || item?.encoding_model || '').trim(),
+                            encodingVariant: String(item?.encodingVariant || item?.encoding_variant || '').trim(),
                             cacheSecretKey: String(item?.cacheSecretKey || item?.cache_secret_key || '').trim(),
                             strength: this._clampReferenceValue(item?.strength ?? item?.referenceStrength, 0.6, 0, 1),
                             informationExtracted: this._clampReferenceValue(
@@ -485,6 +494,50 @@ export class ImageGenerationManager {
         const blob = await response.blob();
         const dataUrl = await this._blobToDataUrl(blob);
         return dataUrl.startsWith('data:image/') ? dataUrl : '';
+    }
+
+    async _readNovelAIVibeEncoding(path, cacheKey = '', signal = null) {
+        const url = String(path || '').trim().replace(/\\/g, '/');
+        if (!url.startsWith('/') || !/\/files\/[^/?#]+/i.test(url) || url.includes('..')) {
+            throw new Error('Vibe 编码文件路径无效，请重新导入');
+        }
+        const key = String(cacheKey || url).trim();
+        if (this._novelAIVibeEncodingCache.has(key)) return this._novelAIVibeEncodingCache.get(key);
+
+        const pending = (async () => {
+            const rawFetch = typeof window !== 'undefined' && typeof window.VirtualPhoneRawFetch === 'function'
+                ? window.VirtualPhoneRawFetch
+                : fetch;
+            const headers = typeof window !== 'undefined' && typeof window.getRequestHeaders === 'function'
+                ? { ...(window.getRequestHeaders() || {}) }
+                : {};
+            headers['X-ST-Phone-Internal-API'] = '1';
+            const response = await rawFetch(url, {
+                credentials: 'include',
+                cache: 'no-store',
+                headers,
+                signal,
+                stPhoneInternalApi: true
+            });
+            if (!response.ok) throw new Error(`Vibe 编码文件读取失败（HTTP ${response.status}），请重新导入`);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (!bytes.length || bytes.length > 1024 * 1024) throw new Error('Vibe 编码文件大小无效，请重新导入');
+            if (/^[a-f0-9]{64}$/i.test(String(cacheKey || '')) && globalThis.crypto?.subtle) {
+                const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+                const actualHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+                if (actualHash.toLowerCase() !== String(cacheKey).toLowerCase()) {
+                    throw new Error('Vibe 编码文件校验失败，请重新导入');
+                }
+            }
+            return this._uint8ArrayToBase64(bytes);
+        })();
+        this._novelAIVibeEncodingCache.set(key, pending);
+        try {
+            return await pending;
+        } catch (error) {
+            this._novelAIVibeEncodingCache.delete(key);
+            throw error;
+        }
     }
 
     async _encodeNovelAIVibeImage(image, informationExtracted, config, signal) {
@@ -558,9 +611,15 @@ export class ImageGenerationManager {
 
         const resolved = [];
         for (const item of group.items) {
+            const encodingPath = String(item.encodingPath || '').trim();
+            if (encodingPath && item.encodingModel && String(item.encodingModel).trim() !== String(config?.model || '').trim()) {
+                throw new Error(`当前 Vibe 编码适用于 ${item.encodingModel}，与当前模型 ${config?.model || '未知'} 不兼容`);
+            }
             const source = String(item.image || '').trim();
-            let image = this._normalizeNovelAIReferenceImage(source);
-            if (!image && source) {
+            let image = encodingPath
+                ? await this._readNovelAIVibeEncoding(encodingPath, item.encodingHash || item.cacheSecretKey, options.signal)
+                : this._normalizeNovelAIReferenceImage(source);
+            if (!encodingPath && !image && source) {
                 try {
                     image = this._normalizeNovelAIReferenceImage(await this._imageUrlToNovelAIReferenceDataUrl(source));
                 } catch (err) {
@@ -2399,6 +2458,126 @@ export class ImageGenerationManager {
             .trim();
     }
 
+    _normalizeNovelAILabeledCenter(center = null, model = '') {
+        const rawX = Number.parseFloat(center?.x);
+        const rawY = Number.parseFloat(center?.y);
+        if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return null;
+
+        const clamp = value => Math.max(0.1, Math.min(0.9, value));
+        const normalized = {
+            x: clamp(rawX),
+            y: clamp(rawY)
+        };
+        if (!this._isNovelAIV45Model(model)) return normalized;
+
+        const grid = [0.1, 0.3, 0.5, 0.7, 0.9];
+        const snap = (value) => grid.reduce((best, candidate) => {
+            const distance = Math.abs(candidate - value);
+            const bestDistance = Math.abs(best - value);
+            if (distance < bestDistance - Number.EPSILON * 10) return candidate;
+            if (distance > bestDistance + Number.EPSILON * 10) return best;
+            return Math.abs(candidate - 0.5) < Math.abs(best - 0.5) ? candidate : best;
+        }, grid[0]);
+        return {
+            x: snap(normalized.x),
+            y: snap(normalized.y)
+        };
+    }
+
+    _parseNovelAILabeledCharacterPromptSyntax(prompt = '', negativePrompt = '', model = '') {
+        if (!this._isNovelAIV45Model(model) && !this._isNovelAIV5Model(model)) return null;
+
+        const source = String(prompt || '').replace(/\r/g, '');
+        const sections = {
+            scenePrompt: [],
+            characters: new Map(),
+            centers: new Map()
+        };
+        let activeSection = null;
+        let foundScenePrompt = false;
+
+        const append = (section, value) => {
+            const text = String(value || '').trim();
+            if (!text || text === '---' || /^```/.test(text)) return;
+            if (section.type === 'scenePrompt') {
+                sections.scenePrompt.push(text);
+                return;
+            }
+            const target = section.type === 'character' ? sections.characters : sections.centers;
+            if (!target.has(section.index)) target.set(section.index, []);
+            target.get(section.index).push(text);
+        };
+
+        source.split('\n').forEach((rawLine) => {
+            const line = String(rawLine || '').trim();
+            if (!line || /^```/.test(line)) return;
+            const headerMatch = line.match(
+                /^(?:\*{1,2}\s*)?(scene\s*prompt|characters?\s*(\d+)|centers?\s*(\d+))\s*[:：]\s*(?:\*{1,2}\s*)?(.*?)(?:\s*\*{1,2})?$/i
+            );
+            if (headerMatch) {
+                const label = String(headerMatch[1] || '').replace(/\s+/g, '').toLowerCase();
+                if (label === 'sceneprompt') {
+                    foundScenePrompt = true;
+                    activeSection = { type: 'scenePrompt' };
+                } else {
+                    const isCharacter = label.startsWith('character');
+                    const index = Number(headerMatch[2] || headerMatch[3]);
+                    activeSection = {
+                        type: isCharacter ? 'character' : 'center',
+                        index
+                    };
+                }
+                append(activeSection, headerMatch[4]);
+                return;
+            }
+            if (activeSection) append(activeSection, line);
+        });
+
+        if (!foundScenePrompt) return null;
+
+        const maxCharacters = this._isNovelAIV5Model(model) ? 22 : 6;
+        const characterIndexes = [...sections.characters.keys()]
+            .filter(index => Number.isInteger(index) && index > 0)
+            .sort((left, right) => left - right)
+            .slice(0, maxCharacters);
+        const characters = characterIndexes.map((index) => {
+            const charCaption = this._trimNovelAIPromptSeparators(
+                (sections.characters.get(index) || []).join(' ')
+            );
+            const centerText = (sections.centers.get(index) || []).join(' ');
+            const xMatch = centerText.match(/(?:^|[,，;；\s])x\s*[:=]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))/i);
+            const yMatch = centerText.match(/(?:^|[,，;；\s])y\s*[:=]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))/i);
+            const center = this._normalizeNovelAILabeledCenter({
+                x: xMatch?.[1],
+                y: yMatch?.[1]
+            }, model);
+            return {
+                charCaption,
+                negativeCaption: '',
+                center
+            };
+        }).filter(item => item.charCaption);
+
+        const useCoords = characters.length > 0 && characters.every(item => item.center);
+        if (!useCoords) {
+            characters.forEach((item) => {
+                item.center = null;
+            });
+        }
+
+        return {
+            baseCaption: this._trimNovelAIPromptSeparators(sections.scenePrompt.join(' ')),
+            negativeBaseCaption: String(negativePrompt || '').trim(),
+            characters,
+            useCoords
+        };
+    }
+
+    _parseNovelAIPromptSyntax(prompt = '', negativePrompt = '', model = '') {
+        return this._parseNovelAILabeledCharacterPromptSyntax(prompt, negativePrompt, model)
+            || this._parseNovelAICharacterPromptSyntax(prompt, negativePrompt);
+    }
+
     _parseNovelAICharacterPromptSyntax(prompt = '', negativePrompt = '') {
         const source = String(prompt || '');
         const characters = [];
@@ -2466,7 +2645,7 @@ export class ImageGenerationManager {
         const appKey = String(options.app || '').trim().toLowerCase();
         const aiPrompt = String(options.prompt || '').trim();
         const parsedV4Prompt = this._isNovelAIV4PlusModel(config.model)
-            ? this._parseNovelAICharacterPromptSyntax(aiPrompt, '')
+            ? this._parseNovelAIPromptSyntax(aiPrompt, '', config.model)
             : null;
         const rawPrompt = this._joinPrompt([
             config.fixedPrompt,

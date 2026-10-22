@@ -7,7 +7,7 @@
 
 import { PHONE_CONFIG } from '../../config/apps.js';
 
-export const ALBUM_CSS_URL = new URL('./album.css?v=1.2.3&r=20261006-story-image-outside-close', import.meta.url).href;
+export const ALBUM_CSS_URL = new URL('./album.css?v=1.2.3&r=20261021-album-lazy-folds', import.meta.url).href;
 
 export class AlbumView {
     constructor(app) {
@@ -20,9 +20,15 @@ export class AlbumView {
         this._missingImagePaths = new Set();
         this.isDeleting = false;
         this.isBulkDeleting = false;
+        this.isBulkDownloading = false;
         this.activeSource = 'all';
         this.sourceMenuOpen = false;
         this.currentView = 'main';
+        this.renderBatchSize = 48;
+        this.renderLimit = this.renderBatchSize;
+        this._mediaRefreshScheduled = false;
+        this._loadMoreObserver = null;
+        this._pendingScrollTop = null;
     }
 
     loadCSS() {
@@ -45,7 +51,7 @@ export class AlbumView {
             this.renderStoryImageSettings();
             return;
         }
-        this.images = this.app.albumData.getMedia();
+        this.images = this.app.albumData.getMedia({ fast: true });
         const sourceGroups = this.app.albumData.groupImagesBySource(this.images);
         if (this.activeSource !== 'all' && !sourceGroups.some(group => group.key === this.activeSource)) {
             this.activeSource = 'all';
@@ -73,7 +79,9 @@ export class AlbumView {
                     </div>
                     <div class="album-header-actions">
                         ${this.selectionMode ? `
-                            <button type="button" class="album-select-btn" id="album-select-all">${allSelected ? '取消全选' : '全选'}</button>
+                            <button type="button" class="album-icon-btn" id="album-download-selected" aria-label="下载所选" title="下载所选" ${selectedCount ? '' : 'disabled'}>
+                                <i class="fa-solid fa-download"></i>
+                            </button>
                             <button type="button" class="album-icon-btn album-danger-btn" id="album-delete-selected" aria-label="删除所选" ${selectedCount ? '' : 'disabled'}>
                                 <i class="fa-regular fa-trash-can"></i>
                             </button>
@@ -94,7 +102,9 @@ export class AlbumView {
                                     <span>分类</span>
                                     <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
                                 </button>
-                                <button type="button" id="album-select-toggle">选择</button>
+                                ${this.selectionMode
+                                    ? `<button type="button" id="album-select-all">${allSelected ? '取消全选' : '全选'}</button>`
+                                    : '<button type="button" id="album-select-toggle">选择</button>'}
                             </div>
                         </div>
                         ${this.renderSourceSections(visibleImages)}
@@ -105,7 +115,13 @@ export class AlbumView {
         `;
 
         this.app.phoneShell.setContent(html, 'album-main');
-        requestAnimationFrame(() => this.bindEvents());
+        requestAnimationFrame(() => {
+            this.bindEvents();
+            const body = (document.querySelector('.phone-view-current') || document).querySelector('.album-app .album-body');
+            if (body && Number.isFinite(this._pendingScrollTop)) body.scrollTop = this._pendingScrollTop;
+            this._pendingScrollTop = null;
+        });
+        this.scheduleCompleteMediaRefresh();
     }
 
 
@@ -118,6 +134,12 @@ export class AlbumView {
             || {};
         const promptContent = promptManager?.getPromptForFeature?.('story', 'override')
             || promptConfig.content
+            || '';
+        const generationPromptConfig = promptManager?.prompts?.story?.generate
+            || promptManager?.getDefaultPrompts?.()?.story?.generate
+            || {};
+        const generationPromptContent = promptManager?.getPromptForFeature?.('story', 'generate')
+            || generationPromptConfig.content
             || '';
         const useStoryWorldbook = window.VirtualPhone?.worldbookManager?.getEnabled?.('story') ?? true;
         const wallpaperStyle = this.getWallpaperStyle();
@@ -151,6 +173,13 @@ export class AlbumView {
                             description: '新正文楼层的后台任务完成后，自动生成 Tags 和图片',
                             icon: 'fa-wand-magic-sparkles',
                             checked: settings.autoEnabled
+                        })}
+                        ${this.renderStoryImageSettingRow({
+                            id: 'album-story-image-manual-tags-auto-image',
+                            title: '手动生成 Tags 后自动生图',
+                            description: '手动生成 Tags 完成后，自动调用生图模型',
+                            icon: 'fa-image',
+                            checked: settings.manualTagsAutoImageEnabled
                         })}
                         ${this.renderStoryImageSettingRow({
                             id: 'album-story-image-auto-preview',
@@ -196,7 +225,7 @@ export class AlbumView {
                             </button>
                             <div class="phone-prompt-fold-content" id="album-story-worldbook-fold-content" aria-hidden="true">
                                 <div id="album-story-worldbook-list" class="album-story-worldbook-list">
-                                    <div class="phone-worldbook-status">正在读取当前可用世界书...</div>
+                                    <div class="phone-worldbook-status">展开后读取当前可用世界书。</div>
                                 </div>
                             </div>
                         </div>
@@ -217,6 +246,25 @@ export class AlbumView {
                                 <textarea class="album-story-prompt-editor" id="album-story-override-prompt" spellcheck="false">${this.escapeHtml(promptContent)}</textarea>
                                 <div class="album-story-prompt-actions">
                                     <button type="button" class="album-story-prompt-reset" id="album-story-reset-prompt">
+                                        <i class="fa-solid fa-rotate-left" aria-hidden="true"></i>
+                                        <span>恢复默认</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="phone-prompt-fold album-story-settings-fold album-story-prompt-fold" data-default-open="false">
+                            <button type="button" class="phone-prompt-fold-header" data-no-swipe-back aria-expanded="false" aria-controls="album-story-generation-prompt-fold-content">
+                                <span class="phone-prompt-fold-main">
+                                    <span class="phone-prompt-fold-title">${this.escapeHtml(generationPromptConfig.name || '正文生图提示词')}</span>
+                                    <span class="phone-prompt-fold-desc">${this.escapeHtml(generationPromptConfig.description || '控制正文内容如何转换为最终生图提示词')}</span>
+                                </span>
+                                <i class="fa-solid fa-chevron-right phone-prompt-fold-arrow" aria-hidden="true"></i>
+                            </button>
+                            <div class="phone-prompt-fold-content" id="album-story-generation-prompt-fold-content" aria-hidden="true">
+                                ${promptManager?.renderPromptPresetControls?.('story', 'generate') || ''}
+                                <textarea class="album-story-prompt-editor" id="album-story-generation-prompt" spellcheck="false">${this.escapeHtml(generationPromptContent)}</textarea>
+                                <div class="album-story-prompt-actions">
+                                    <button type="button" class="album-story-prompt-reset" id="album-story-reset-generation-prompt">
                                         <i class="fa-solid fa-rotate-left" aria-hidden="true"></i>
                                         <span>恢复默认</span>
                                     </button>
@@ -307,10 +355,17 @@ export class AlbumView {
     renderSourceSections(images = []) {
         const groups = this.app.albumData.groupImagesBySource(images);
         const previewMode = this.activeSource === 'all' && !this.selectionMode;
+        const limitedPaths = previewMode
+            ? null
+            : new Set(images.slice(0, this.renderLimit).map(image => image.path));
+        const hasMore = !previewMode && this.renderLimit < images.length;
         return `
             <div class="album-source-sections">
                 ${groups.map(group => {
-                    const shownImages = previewMode ? group.images.slice(0, 4) : group.images;
+                    const shownImages = previewMode
+                        ? group.images.slice(0, 4)
+                        : group.images.filter(image => limitedPaths.has(image.path));
+                    if (shownImages.length === 0) return '';
                     const canFocus = this.activeSource === 'all' && !this.selectionMode;
                     return `
                         <section class="album-source-section" data-source-key="${this.escapeAttr(group.key)}">
@@ -329,6 +384,12 @@ export class AlbumView {
                     `;
                 }).join('')}
             </div>
+            ${hasMore ? `
+                <button type="button" class="album-load-more" id="album-load-more">
+                    <span>继续加载</span>
+                    <small>已显示 ${Math.min(this.renderLimit, images.length)} / ${images.length}</small>
+                </button>
+            ` : ''}
         `;
     }
 
@@ -336,8 +397,8 @@ export class AlbumView {
         const index = this.images.indexOf(image);
         const isVideo = image?.mediaType === 'video';
         const mediaHtml = isVideo
-            ? `<video src="${this.escapeAttr(image.src)}" muted playsinline webkit-playsinline preload="metadata" aria-hidden="true"></video><span class="album-video-indicator" aria-hidden="true"><i class="fa-solid fa-play"></i></span>`
-            : `<img src="${this.escapeAttr(image.src)}" alt="">`;
+            ? `<video src="${this.escapeAttr(image.src)}" muted playsinline webkit-playsinline preload="none" aria-hidden="true"></video><span class="album-video-indicator" aria-hidden="true"><i class="fa-solid fa-play"></i></span>`
+            : `<img src="${this.escapeAttr(image.src)}" alt="" loading="lazy" decoding="async">`;
         return `
             <div class="album-tile${isVideo ? ' is-video' : ''}${this.selectedPaths.has(image.path) ? ' selected' : ''}" data-index="${index}" title="${this.escapeHtml(image.filename)}">
                 <button type="button" class="album-tile-main" data-index="${index}" aria-label="${this.selectionMode ? '选择' : '查看'}${isVideo ? '视频' : '图片'}">
@@ -365,15 +426,19 @@ export class AlbumView {
             this.bindStoryImageSettingsEvents(root);
             return;
         }
+        if (root.dataset.albumEventsBound === 'true') return;
+        root.dataset.albumEventsBound = 'true';
         root.querySelector('#album-back')?.addEventListener('click', () => {
             if (this.selectionMode) {
                 this.selectionMode = false;
+                this.renderLimit = this.renderBatchSize;
                 this.selectedPaths.clear();
                 this.render();
                 return;
             }
             if (this.activeSource !== 'all') {
                 this.activeSource = 'all';
+                this.renderLimit = this.renderBatchSize;
                 this.render();
                 return;
             }
@@ -394,6 +459,7 @@ export class AlbumView {
         root.querySelectorAll('[data-album-source]').forEach(option => {
             option.addEventListener('click', () => {
                 this.activeSource = option.dataset.albumSource || 'all';
+                this.renderLimit = this.renderBatchSize;
                 this.selectedPaths.clear();
                 this.render();
             });
@@ -401,15 +467,19 @@ export class AlbumView {
         root.querySelectorAll('[data-album-source-focus]').forEach(heading => {
             heading.addEventListener('click', () => {
                 this.activeSource = heading.dataset.albumSourceFocus || 'all';
+                this.renderLimit = this.renderBatchSize;
                 this.render();
             });
         });
         root.querySelector('#album-select-toggle')?.addEventListener('click', () => {
             this.selectionMode = true;
+            this.renderLimit = this.renderBatchSize;
             this.selectedPaths.clear();
             this.render();
         });
+        root.querySelector('#album-load-more')?.addEventListener('click', () => this.loadMoreImages(root));
         root.querySelector('#album-select-all')?.addEventListener('click', () => this.toggleSelectAll());
+        root.querySelector('#album-download-selected')?.addEventListener('click', () => this.downloadSelectedImages());
         root.querySelector('#album-delete-selected')?.addEventListener('click', () => this.deleteSelectedImages());
         root.querySelectorAll('.album-tile-main').forEach(tile => {
             tile.addEventListener('click', () => {
@@ -435,9 +505,56 @@ export class AlbumView {
                 video.closest('.album-tile')?.classList.add('is-broken');
             }, { once: true });
         });
+        this.observeLoadMore(root);
+    }
+
+    loadMoreImages(root = null) {
+        const albumRoot = root || (document.querySelector('.phone-view-current') || document).querySelector('.album-app');
+        const body = albumRoot?.querySelector('.album-body');
+        this._pendingScrollTop = body?.scrollTop || 0;
+        this.renderLimit += this.renderBatchSize;
+        this.render();
+    }
+
+    observeLoadMore(root) {
+        this._loadMoreObserver?.disconnect?.();
+        this._loadMoreObserver = null;
+        const trigger = root?.querySelector('#album-load-more');
+        const body = root?.querySelector('.album-body');
+        if (!trigger || typeof IntersectionObserver !== 'function') return;
+        this._loadMoreObserver = new IntersectionObserver((entries) => {
+            if (!entries.some(entry => entry.isIntersecting)) return;
+            this._loadMoreObserver?.disconnect?.();
+            this.loadMoreImages(root);
+        }, { root: body, rootMargin: '240px 0px' });
+        this._loadMoreObserver.observe(trigger);
+    }
+
+    scheduleCompleteMediaRefresh() {
+        if (this._mediaRefreshScheduled || this.app.albumData.hasCompleteMediaCache?.()) return;
+        this._mediaRefreshScheduled = true;
+        const run = () => {
+            this._mediaRefreshScheduled = false;
+            const previousSignature = this.images.map(image => `${image.path}:${image.sourceKey}`).join('|');
+            const refreshed = this.app.albumData.refreshMediaCache?.() || this.images;
+            const nextSignature = refreshed.map(image => `${image.path}:${image.sourceKey}`).join('|');
+            if (previousSignature === nextSignature || this.currentView !== 'main') return;
+            const currentView = document.querySelector('.phone-view-current');
+            const body = currentView?.querySelector?.('.album-app .album-body');
+            if (!body) return;
+            this._pendingScrollTop = body.scrollTop || 0;
+            this.render();
+        };
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(run, { timeout: 1200 });
+        } else {
+            setTimeout(run, 80);
+        }
     }
 
     bindStoryImageSettingsEvents(root) {
+        if (root.dataset.albumSettingsEventsBound === 'true') return;
+        root.dataset.albumSettingsEventsBound = 'true';
         root.addEventListener('touchstart', (event) => {
             if (event.target?.closest?.('button, label, input, select, textarea, [role="button"]')) {
                 event.stopPropagation();
@@ -467,33 +584,40 @@ export class AlbumView {
         };
 
         bindToggle('#album-story-image-auto-enabled', 'autoEnabled', { rerender: true });
+        bindToggle('#album-story-image-manual-tags-auto-image', 'manualTagsAutoImageEnabled');
         bindToggle('#album-story-image-auto-preview', 'autoPreviewEnabled');
 
-        root.querySelectorAll('.album-story-settings-fold .phone-prompt-fold-header').forEach((header) => {
-            const toggleFold = () => {
-                const fold = header.closest('.album-story-settings-fold');
-                if (!fold) return;
-                const open = !fold.classList.contains('is-open');
-                fold.classList.toggle('is-open', open);
-                header.setAttribute('aria-expanded', String(open));
-                fold.querySelector('.phone-prompt-fold-content')?.setAttribute('aria-hidden', String(!open));
-            };
-            header.addEventListener('click', toggleFold);
+        root.addEventListener('click', (event) => {
+            const header = event.target?.closest?.('.album-story-settings-fold .phone-prompt-fold-header');
+            if (!header || !root.contains(header)) return;
+            event.preventDefault();
+            const fold = header.closest('.album-story-settings-fold');
+            if (!fold) return;
+            const open = !fold.classList.contains('is-open');
+            fold.classList.toggle('is-open', open);
+            header.setAttribute('aria-expanded', String(open));
+            fold.querySelector('.phone-prompt-fold-content')?.setAttribute('aria-hidden', String(!open));
+            if (open && fold.classList.contains('album-story-worldbook-fold')) {
+                const list = fold.querySelector('#album-story-worldbook-list');
+                this.loadStoryWorldbookSelector(list);
+            }
         });
 
         const worldbookManager = window.VirtualPhone?.worldbookManager;
         const worldbookList = root.querySelector('#album-story-worldbook-list');
-        if (worldbookManager && worldbookList) {
-            worldbookManager.renderWorldbookSelector(worldbookList, 'story');
-        }
         root.querySelector('#album-story-use-worldbook')?.addEventListener('change', async (event) => {
             const input = event.currentTarget;
             const enabled = !!input.checked;
             input.disabled = true;
             try {
                 await worldbookManager?.setEnabled?.('story', enabled);
-                if (worldbookManager && worldbookList) {
-                    await worldbookManager.renderWorldbookSelector(worldbookList, 'story');
+                if (worldbookList) {
+                    delete worldbookList.dataset.albumWorldbookLoaded;
+                    if (worldbookList.closest('.album-story-worldbook-fold')?.classList.contains('is-open')) {
+                        await this.loadStoryWorldbookSelector(worldbookList, { force: true });
+                    } else {
+                        worldbookList.innerHTML = `<div class="phone-worldbook-status">${enabled ? '展开后读取当前可用世界书。' : '世界书注入已关闭。'}</div>`;
+                    }
                 }
                 this.app.phoneShell?.showNotification?.(
                     '正文生图',
@@ -513,6 +637,9 @@ export class AlbumView {
         promptManager?.bindPromptPresetControls?.(root, 'story', 'override', '#album-story-override-prompt', {
             notify: (title, message, icon) => this.app.phoneShell?.showNotification?.(title, message, icon)
         });
+        promptManager?.bindPromptPresetControls?.(root, 'story', 'generate', '#album-story-generation-prompt', {
+            notify: (title, message, icon) => this.app.phoneShell?.showNotification?.(title, message, icon)
+        });
         root.querySelector('#album-story-reset-prompt')?.addEventListener('click', () => {
             const defaultContent = promptManager?.resetPromptToDefault?.('story', 'override')
                 ?? promptManager?.getDefaultPrompts?.()?.story?.override?.content
@@ -523,6 +650,34 @@ export class AlbumView {
             if (select) select.value = promptManager?.getActivePromptPresetId?.('story', 'override') || '';
             this.app.phoneShell?.showNotification?.('正文生图', '已恢复默认破限提示词', '🔄');
         });
+        root.querySelector('#album-story-reset-generation-prompt')?.addEventListener('click', () => {
+            const defaultContent = promptManager?.resetPromptToDefault?.('story', 'generate')
+                ?? promptManager?.getDefaultPrompts?.()?.story?.generate?.content
+                ?? '';
+            const textarea = root.querySelector('#album-story-generation-prompt');
+            if (textarea) textarea.value = defaultContent;
+            const select = root.querySelector('[data-prompt-app="story"][data-prompt-feature="generate"] .phone-prompt-preset-select');
+            if (select) select.value = promptManager?.getActivePromptPresetId?.('story', 'generate') || '';
+            this.app.phoneShell?.showNotification?.('正文生图', '已恢复默认生图提示词', '🔄');
+        });
+    }
+
+    async loadStoryWorldbookSelector(container, options = {}) {
+        const manager = window.VirtualPhone?.worldbookManager;
+        if (!container || !manager) return;
+        if (container.dataset.albumWorldbookLoading === 'true') return;
+        if (container.dataset.albumWorldbookLoaded === 'true' && options.force !== true) return;
+        container.dataset.albumWorldbookLoading = 'true';
+        container.innerHTML = '<div class="phone-worldbook-status">正在读取当前可用世界书...</div>';
+        try {
+            await manager.renderWorldbookSelector(container, 'story', { force: options.force === true });
+            container.dataset.albumWorldbookLoaded = 'true';
+        } catch (error) {
+            console.warn('[Album] 正文生图世界书列表读取失败:', error);
+            container.innerHTML = '<div class="phone-worldbook-status is-error">世界书读取失败，请稍后重试。</div>';
+        } finally {
+            delete container.dataset.albumWorldbookLoading;
+        }
     }
 
 
@@ -544,6 +699,9 @@ export class AlbumView {
 
         const selectAllBtn = root?.querySelector('#album-select-all');
         if (selectAllBtn) selectAllBtn.textContent = allSelected ? '取消全选' : '全选';
+
+        const downloadBtn = root?.querySelector('#album-download-selected');
+        if (downloadBtn) downloadBtn.disabled = selectedCount === 0 || this.isBulkDownloading;
 
         const deleteBtn = root?.querySelector('#album-delete-selected');
         if (deleteBtn) deleteBtn.disabled = selectedCount === 0;
@@ -592,6 +750,40 @@ export class AlbumView {
         this.refreshSelectionUI();
     }
 
+    async downloadSelectedImages() {
+        if (this.isBulkDownloading || this.isDeleting || this.isBulkDeleting) return;
+        const selected = this.images.filter(image => this.selectedPaths.has(image.path));
+        if (selected.length === 0) return;
+
+        const downloadBtn = (document.querySelector('.phone-view-current') || document).querySelector('#album-download-selected');
+        if (downloadBtn) downloadBtn.disabled = true;
+        this.isBulkDownloading = true;
+        let successCount = 0;
+        let failureCount = 0;
+        try {
+            for (const media of selected) {
+                try {
+                    await this.app.storyImageOverlay.downloadMediaFile(
+                        media.src,
+                        media.filename || `album-${Date.now()}.${media.mediaType === 'video' ? 'mp4' : 'png'}`,
+                        { notify: false }
+                    );
+                    successCount += 1;
+                } catch (error) {
+                    failureCount += 1;
+                    console.error('下载所选相册媒体失败:', media.path, error);
+                }
+            }
+            const summary = failureCount
+                ? `已下载 ${successCount} 项，${failureCount} 项失败`
+                : `已下载 ${successCount} 项`;
+            this.app.phoneShell?.showNotification?.('相册', summary, failureCount ? '⚠️' : '✅');
+        } finally {
+            this.isBulkDownloading = false;
+            this.refreshSelectionUI();
+        }
+    }
+
     openPreview(index) {
         const image = this.images[index];
         if (!image) return;
@@ -608,9 +800,14 @@ export class AlbumView {
                     <button type="button" class="album-preview-close" aria-label="关闭">
                         <i class="fa-solid fa-xmark"></i>
                     </button>
-                    <button type="button" class="album-preview-delete" aria-label="删除">
-                        <i class="fa-regular fa-trash-can"></i>
-                    </button>
+                    <div class="album-preview-actions">
+                        <button type="button" class="album-preview-download" aria-label="下载${isVideo ? '视频' : '图片'}" title="下载${isVideo ? '视频' : '图片'}">
+                            <i class="fa-solid fa-download"></i>
+                        </button>
+                        <button type="button" class="album-preview-delete" aria-label="删除">
+                            <i class="fa-regular fa-trash-can"></i>
+                        </button>
+                    </div>
                 </div>
                 <div class="album-preview-image-wrap${isVideo ? ' is-video' : ''}">
                     ${isVideo
@@ -633,6 +830,27 @@ export class AlbumView {
         });
         overlay.querySelector('.album-preview-close')?.addEventListener('click', () => this.closePreview());
         overlay.querySelector('.album-preview-delete')?.addEventListener('click', () => this.deleteImage(image));
+        overlay.querySelector('.album-preview-download')?.addEventListener('click', async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const button = event.currentTarget;
+            button.disabled = true;
+            try {
+                await this.app.storyImageOverlay.downloadMediaFile(
+                    image.src,
+                    image.filename || `album-${Date.now()}.${isVideo ? 'mp4' : 'png'}`
+                );
+            } catch (error) {
+                console.error('下载相册媒体失败:', error);
+                this.app.phoneShell?.showNotification?.(
+                    '相册',
+                    `下载失败：${String(error?.message || error || '未知错误')}`,
+                    '⚠️'
+                );
+            } finally {
+                if (button.isConnected) button.disabled = false;
+            }
+        });
 
         if (isVideo) {
             const video = overlay.querySelector('.album-preview-video');

@@ -27,10 +27,17 @@ export class StoryImageOverlay {
         this._imagePreloads = new Map();
         this._navigationRequestId = 0;
         this._onKeyDown = event => {
-            if (event.key === 'Escape') this.close();
+            if (event.key === 'Escape') {
+                const menu = document.querySelector(`#${STORY_OVERLAY_ROOT_ID} .phone-story-image-menu[open]`);
+                if (menu) { menu.open = false; menu.querySelector('summary')?.focus(); }
+                else this.close();
+            }
         };
         this._onRootClick = event => {
             event.stopPropagation();
+            if (!event.target.closest?.('.phone-story-image-menu')) {
+                event.currentTarget.querySelector?.('.phone-story-image-menu[open]')?.removeAttribute('open');
+            }
             if (event.target === event.currentTarget) this.close();
         };
         this._onResize = () => this.scheduleStageFit();
@@ -239,11 +246,22 @@ export class StoryImageOverlay {
                                     </div>
                                     <textarea class="phone-story-image-tags" rows="8" placeholder="生成的 Tags 会显示在这里" ${editingTags ? '' : 'readonly'} ${anyBusy ? 'disabled' : ''}>${this.escapeHtml(tags)}</textarea>
                                 </div>
-                                ${hasTags ? `
-                                    <button type="button" class="phone-story-image-flip" aria-label="${showTagBack ? '返回图片正面' : `查看 #${floor.floor} 的 Tags`}" title="${showTagBack ? '返回图片' : '查看 Tags'}">
-                                        <i class="fa-solid fa-rotate" aria-hidden="true"></i>
+                                ${showTagBack ? `
+                                    <button type="button" class="phone-story-image-return" aria-label="返回图片正面" title="返回图片">
+                                        <i class="fa-solid fa-arrow-left" aria-hidden="true"></i>
                                     </button>
-                                ` : ''}
+                                ` : (hasTags || floor.imageUrl ? `
+                                    <details class="phone-story-image-menu">
+                                        <summary class="phone-story-image-more" aria-label="图片操作" title="图片操作"><i class="fa-solid fa-ellipsis" aria-hidden="true"></i></summary>
+                                        <div class="phone-story-image-menu-items">
+                                            ${hasTags ? `<button type="button" class="phone-story-image-flip"><i class="fa-solid fa-rotate" aria-hidden="true"></i><span>查看 Tags</span></button>` : ''}
+                                            ${floor.imageUrl ? `
+                                                <button type="button" class="phone-story-image-delete" ${anyBusy ? 'disabled' : ''}><i class="fa-solid fa-trash-can" aria-hidden="true"></i>删除图片</button>
+                                                <button type="button" class="phone-story-image-download"><i class="fa-solid fa-download" aria-hidden="true"></i>下载图片</button>
+                                            ` : ''}
+                                        </div>
+                                    </details>
+                                ` : '')}
                             </div>
                             <button type="button" class="phone-story-image-nav is-next" aria-label="下一正文楼层" ${floorIndex >= floors.length - 1 || anyBusy ? 'disabled' : ''}>
                                 <i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
@@ -419,14 +437,13 @@ export class StoryImageOverlay {
         root.querySelector('.phone-story-image-nav.is-prev')?.addEventListener('click', () => navigate(-1));
         root.querySelector('.phone-story-image-nav.is-next')?.addEventListener('click', () => navigate(1));
 
-        const stage = root.querySelector('.phone-story-image-stage');
-        root.querySelector('.phone-story-image-flip')?.addEventListener('click', event => {
-            const showBack = !stage?.classList.contains('is-showing-back');
-            if (showBack) this.showTagBack(floor.floor);
-            else this.showImageFront(floor.floor);
-            stage?.classList.toggle('is-showing-back', showBack);
-            event.currentTarget.setAttribute('aria-label', showBack ? '返回图片正面' : `查看 #${floor.floor} 的 Tags`);
-            event.currentTarget.setAttribute('title', showBack ? '返回图片' : '查看 Tags');
+        root.querySelector('.phone-story-image-flip')?.addEventListener('click', () => {
+            this.showTagBack(floor.floor);
+            this.render();
+        });
+        root.querySelector('.phone-story-image-return')?.addEventListener('click', () => {
+            this.showImageFront(floor.floor);
+            this.render();
         });
 
         const tagsInput = root.querySelector('.phone-story-image-tags');
@@ -467,14 +484,140 @@ export class StoryImageOverlay {
             this.editingTagFloors.delete(floor.floor);
             setEditingState(false);
         });
-        root.querySelector('.phone-story-image-action.is-tag')?.addEventListener('click', () => {
+        root.querySelector('.phone-story-image-action.is-tag')?.addEventListener('click', async () => {
             this.editingTagFloors.delete(floor.floor);
-            this.app.generateStoryTags(floor.floor);
+            const tagsResult = await this.app.generateStoryTags(floor.floor, {
+                expectedMessage: floor.message
+            });
+            if (!tagsResult?.success) return;
+
+            const settings = this.app.albumData.getStoryImageSettings();
+            if (!settings.manualTagsAutoImageEnabled) return;
+            await this.app.generateStoryImage(floor.floor, tagsResult.tags, {
+                expectedMessage: floor.message
+            });
         });
         root.querySelector('.phone-story-image-action.is-image')?.addEventListener('click', () => {
             this.editingTagFloors.delete(floor.floor);
             this.app.generateStoryImage(floor.floor, tagsInput?.value || floor.tags);
         });
+        root.querySelector('.phone-story-image-delete')?.addEventListener('click', async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const button = event.currentTarget;
+            button.disabled = true;
+            root.querySelector('.phone-story-image-menu')?.removeAttribute('open');
+            try {
+                await this.deleteStoryImage(floor);
+            } catch (error) {
+                this.app._showStoryNotification?.('正文生图', `删除失败：${error?.message || error}`, '⚠️');
+            } finally {
+                if (button.isConnected) button.disabled = false;
+            }
+        });
+        root.querySelector('.phone-story-image-download')?.addEventListener('click', async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const button = event.currentTarget;
+            button.disabled = true;
+            try {
+                root.querySelector('.phone-story-image-menu')?.removeAttribute('open');
+                await this.downloadStoryImage(floor);
+            } catch (error) {
+                console.error('[StoryImageOverlay] 正文图片下载失败:', error);
+                this.app._showStoryNotification?.(
+                    '正文生图',
+                    `图片下载失败：${String(error?.message || error || '未知错误')}`,
+                    '⚠️'
+                );
+            } finally {
+                if (button.isConnected) button.disabled = false;
+            }
+        });
+    }
+
+    async deleteStoryImage(floor = {}) {
+        if (this._deletingStoryImage || this.app.isStoryImageBusy(floor.floor) || this.app.isStoryTagBusy(floor.floor)) return false;
+        const current = this.app.albumData.getStoryFloor(floor.floor);
+        if (!current || current.message !== floor.message || current.imageUrl !== floor.imageUrl || !current.imageUrl) return false;
+        if (!window.confirm('删除当前图片吗？相册中的这张图片及其引用也会移除，Tags 会保留，可手动重新生成。')) return false;
+        this._deletingStoryImage = true;
+        try {
+            const result = await this.app.albumData.deleteImage(current.imageUrl);
+            if (!result?.success) throw new Error(result?.message || '图片删除失败');
+            this._imageDimensions.delete(current.imageUrl);
+            this._imagePreloads.delete(current.imageUrl);
+            this.refresh();
+            window.dispatchEvent(new CustomEvent('phone:albumImageDeleted'));
+            this.app._showStoryNotification?.('正文生图', '图片已删除，Tags 已保留', '✅');
+            return true;
+        } finally {
+            this._deletingStoryImage = false;
+        }
+    }
+
+    async downloadStoryImage(floor = {}) {
+        const imageUrl = String(floor.imageUrl || '').trim();
+        if (!imageUrl) throw new Error('当前楼层没有可下载的图片');
+        const fileName = this.getStoryImageDownloadName(floor);
+        return this.downloadMediaFile(imageUrl, fileName);
+    }
+
+    async downloadMediaFile(imageUrl, fileName, { notify = true } = {}) {
+        if (this.isTauriRuntime()) {
+            const response = await fetch(imageUrl, { credentials: 'include', cache: 'no-store' });
+            if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）`);
+            const blob = await response.blob();
+            const fileExport = await import('/scripts/file-export.js');
+            if (typeof fileExport.downloadBlobWithRuntime !== 'function') {
+                throw new Error('TT 原生下载模块不可用');
+            }
+            const result = await fileExport.downloadBlobWithRuntime(blob, fileName, {
+                fallbackName: 'story-image.png'
+            });
+            const destination = String(result?.savedPath || result?.displayName || fileName).trim();
+            if (notify) this.app._showStoryNotification?.('相册', `文件已保存：${destination}`, '✅');
+            return result;
+        }
+
+        const phoneShell = this.app.phoneShell;
+        const downloader = typeof phoneShell?.downloadImage === 'function'
+            ? phoneShell.downloadImage
+            : phoneShell?._downloadImageFromViewer;
+        if (typeof downloader === 'function') {
+            return downloader.call(phoneShell, imageUrl, fileName);
+        }
+
+        const response = await fetch(imageUrl, { credentials: 'include', cache: 'no-store' });
+        if (!response.ok) throw new Error(`读取图片失败（HTTP ${response.status}）`);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = fileName;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        return { mode: 'browser', savedPath: '' };
+    }
+
+    isTauriRuntime() {
+        return typeof window !== 'undefined'
+            && typeof window.__TAURI__?.core?.invoke === 'function';
+    }
+
+    getStoryImageDownloadName(floor = {}) {
+        const imageUrl = String(floor.imageUrl || '').trim();
+        const extension = (
+            imageUrl.match(/^data:image\/(png|jpe?g|webp|gif|avif)(?:;|,)/i)?.[1]
+            || imageUrl.match(/\.((?:png|jpe?g|webp|gif|avif))(?:[?#]|$)/i)?.[1]
+            || 'png'
+        ).toLowerCase();
+        const normalizedExtension = extension === 'jpeg' ? 'jpg' : extension;
+        const floorNumber = Number.parseInt(String(floor.floor ?? ''), 10);
+        const suffix = Number.isInteger(floorNumber) ? `-${floorNumber}` : '';
+        return `story-image${suffix}.${normalizedExtension}`;
     }
 
     escapeHtml(text) {

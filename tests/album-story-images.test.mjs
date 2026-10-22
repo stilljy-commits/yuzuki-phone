@@ -46,6 +46,70 @@ function createFixture() {
     return { context, data, getSaveCount: () => saveCount };
 }
 
+test('album fast media index avoids deep chat scans and keeps a complete cache afterward', () => {
+    const previousWindow = globalThis.window;
+    globalThis.window = { VirtualPhone: { imageManager: { cache: {} } } };
+    let knownStoreScans = 0;
+    let runtimeScans = 0;
+    let localStorageScans = 0;
+    const storage = {
+        get(key, fallback) {
+            if (key === 'phone_album_upload_index') {
+                return JSON.stringify([{
+                    path: '/backgrounds/phone_story_image_1.png',
+                    prefix: 'story_image_1',
+                    createdAt: 10
+                }]);
+            }
+            return fallback;
+        }
+    };
+    try {
+        const data = new AlbumData(storage);
+        data._scanKnownStores = (addImage) => {
+            knownStoreScans += 1;
+            data._scanAlbumUploadIndex(addImage);
+        };
+        data._scanRuntimeData = () => { runtimeScans += 1; };
+        data._scanLocalStorage = () => { localStorageScans += 1; };
+
+        const fast = data.getMedia({ fast: true });
+        assert.equal(fast.length, 1);
+        assert.equal(fast[0].sourceKey, 'story-image');
+        assert.equal(data.hasCompleteMediaCache(), false);
+        assert.deepEqual([knownStoreScans, runtimeScans, localStorageScans], [0, 0, 0]);
+
+        assert.equal(data.getMedia({ fast: true }), fast);
+        const complete = data.refreshMediaCache();
+        assert.equal(complete.length, 1);
+        assert.equal(data.hasCompleteMediaCache(), true);
+        assert.deepEqual([knownStoreScans, runtimeScans, localStorageScans], [1, 1, 1]);
+    } finally {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+    }
+});
+
+test('album category rendering batches tiles and marks images for native lazy decoding', async () => {
+    const { AlbumView } = await import(`../apps/album/album-view.js?batch-test=${Date.now()}`);
+    const data = new AlbumData({ get: (_key, fallback) => fallback });
+    const view = new AlbumView({ albumData: data });
+    const images = Array.from({ length: 100 }, (_, index) => ({
+        path: `/backgrounds/phone_story_image_${index}.png`,
+        src: `/backgrounds/phone_story_image_${index}.png`,
+        filename: `image-${index}.png`,
+        mediaType: 'image',
+        sourceKey: 'story-image'
+    }));
+    view.images = images;
+    view.activeSource = 'story-image';
+
+    const html = view.renderSourceSections(images);
+    assert.equal((html.match(/<div class="album-tile/g) || []).length, 48);
+    assert.match(html, /loading="lazy" decoding="async"/);
+    assert.match(html, /已显示 48 \/ 100/);
+});
+
 test('story floor browser keeps assistant floors without images and honors selected media', () => {
     const { data } = createFixture();
     const floors = data.getStoryFloors();
@@ -192,9 +256,11 @@ test('story image settings use the dedicated automatic key without migrating the
 
     assert.deepEqual(data.getStoryImageSettings(), {
         autoEnabled: false,
+        manualTagsAutoImageEnabled: true,
         autoPreviewEnabled: true
     });
     assert.ok(reads.includes('phone-story-image-auto-enabled'));
+    assert.ok(reads.includes('phone-story-image-manual-tags-auto-image-enabled'));
     assert.ok(reads.includes('phone-story-image-completion-notice-enabled'));
     assert.ok(!reads.includes('phone-story-image-enabled'));
 });
@@ -520,34 +586,63 @@ test('story image browser returns to the latest floor when reopened without a re
     }
 });
 
-test('story image settings own a dedicated worldbook selector and override prompt editor', () => {
+test('story image settings own dedicated worldbook, override, and generation prompt editors', () => {
     const viewSource = fs.readFileSync(new URL('../apps/album/album-view.js', import.meta.url), 'utf8');
     const shellSource = fs.readFileSync(new URL('../phone/phone-shell.js', import.meta.url), 'utf8');
 
     assert.match(viewSource, /id="album-story-use-worldbook"/);
     assert.match(viewSource, /id: 'album-story-image-auto-preview'/);
+    assert.match(viewSource, /id: 'album-story-image-manual-tags-auto-image'/);
+    assert.match(viewSource, /手动生成 Tags 后自动生图/);
     assert.match(viewSource, /生成完成自动预览/);
     assert.doesNotMatch(viewSource, /生成完成提醒/);
     assert.match(viewSource, /id="album-story-worldbook-list"/);
-    assert.match(viewSource, /renderWorldbookSelector\(worldbookList, 'story'\)/);
+    assert.match(viewSource, /loadStoryWorldbookSelector\(list\)/);
+    assert.match(viewSource, /renderWorldbookSelector\(container, 'story'/);
+    assert.match(viewSource, /展开后读取当前可用世界书/);
+    assert.match(viewSource, /albumSettingsEventsBound/);
     assert.match(viewSource, /setEnabled\?\.\('story', enabled\)/);
     assert.match(viewSource, /id="album-story-override-prompt"/);
     assert.match(viewSource, /<button type="button" class="phone-prompt-fold-header" data-no-swipe-back/);
     assert.match(viewSource, /event\.target\?\.closest\?\.\('button, label, input, select, textarea, \[role="button"\]'\)/);
     assert.match(viewSource, /renderPromptPresetControls\?\.\('story', 'override'\)/);
     assert.match(viewSource, /bindPromptPresetControls\?\.\(root, 'story', 'override'/);
+    assert.match(viewSource, /id="album-story-generation-prompt"/);
+    assert.match(viewSource, /renderPromptPresetControls\?\.\('story', 'generate'\)/);
+    assert.match(viewSource, /bindPromptPresetControls\?\.\(root, 'story', 'generate'/);
+    assert.match(promptManagerSource, /createPromptUserPreset\(app, feature, name, ''\)/);
+    assert.match(promptManagerSource, /textarea\.value\s*=\s*preset\.content\s*\|\|\s*''/);
+    assert.match(viewSource, /resetPromptToDefault\?\.\('story', 'generate'\)/);
     assert.match(shellSource, /\.album-story-worldbook-list/);
     assert.match(shellSource, /\.album-story-prompt-editor/);
 });
 
-test('story image override prompt is registered in the default prompt manager', () => {
+test('manual tag generation can continue into image generation through its setting', () => {
+    const overlaySource = fs.readFileSync(new URL('../apps/album/story-image-overlay.js', import.meta.url), 'utf8');
+
+    assert.match(overlaySource, /manualTagsAutoImageEnabled/);
+    assert.match(overlaySource, /generateStoryImage\(floor\.floor, tagsResult\.tags/);
+    assert.match(overlaySource, /expectedMessage: floor\.message/);
+});
+
+test('story image override and generation prompts are registered in the default prompt manager', () => {
     const manager = new PromptManager({ get: () => null, set: async () => {} });
-    const prompt = manager.getDefaultPrompts().story?.override;
+    const prompts = manager.getDefaultPrompts().story;
+    const prompt = prompts?.override;
+    const generationPrompt = prompts?.generate;
     const appSource = fs.readFileSync(new URL('../apps/album/album-app.js', import.meta.url), 'utf8');
 
     assert.equal(prompt?.enabled, true);
     assert.equal(prompt?.name, '🧩 正文生图破限词');
     assert.match(prompt?.content || '', /You create image-generation tags from one selected story floor\./);
+    assert.equal(generationPrompt?.enabled, true);
+    assert.equal(generationPrompt?.name, '正文生图提示词');
+    assert.equal(manager.getBuiltInPromptPresets('story', 'generate')[0]?.name, 'NovelAI V4.5/V5');
+    assert.match(generationPrompt?.content || '', /仅适用于 NovelAI Diffusion V4\.5 与 V5/);
+    assert.match(generationPrompt?.content || '', /scenePrompt:/);
+    assert.match(generationPrompt?.content || '', /character1:/);
+    assert.match(generationPrompt?.content || '', /【当前已有固定形象tags角色】\s*\{\{fixedImageCharacters\}\}/);
+    assert.doesNotMatch(generationPrompt?.content || '', /\{\{imageProvider\}\}|\{\{imageModel\}\}/);
     assert.doesNotMatch(appSource, /You create image-generation tags from one selected story floor\./);
 });
 
@@ -564,7 +659,77 @@ test('story image card uses the natural image ratio without black side backgroun
     assert.match(cssSource, /\.phone-story-image-card-body\s*\{[^}]*padding:\s*0 12px 12px/s);
     assert.match(cssSource, /\.phone-story-image-floor-label\s*\{[^}]*background:\s*rgba\(255, 255, 255, 0\.42\)[^}]*color:\s*var\(--SmartThemeBodyColor, var\(--phone-global-text, #333\)\)[^}]*backdrop-filter:\s*blur\(18px\) saturate\(125%\)/s);
     assert.match(cssSource, /\.phone-story-image-floor-label::after\s*\{[^}]*color:\s*currentColor/s);
-    assert.match(viewSource, /story-image-outside-close/);
+    assert.match(viewSource, /album\.css\?v=[^'\s]+&r=[^'\s]+/);
+});
+
+test('album preview exposes a native-backed download action for historical media', () => {
+    const viewSource = fs.readFileSync(new URL('../apps/album/album-view.js', import.meta.url), 'utf8');
+    const cssSource = fs.readFileSync(new URL('../apps/album/album.css', import.meta.url), 'utf8');
+
+    assert.match(viewSource, /class="album-preview-download"/);
+    assert.match(viewSource, /storyImageOverlay\.downloadMediaFile\(/);
+    assert.match(viewSource, /image\.filename \|\| `album-/);
+    assert.match(cssSource, /\.album-preview-download/);
+    assert.match(cssSource, /\.album-preview-actions/);
+});
+
+test('album selection moves select-all beside the filter and downloads checked media', () => {
+    const viewSource = fs.readFileSync(new URL('../apps/album/album-view.js', import.meta.url), 'utf8');
+
+    assert.match(viewSource, /id="album-download-selected"/);
+    assert.match(viewSource, /id="album-select-all">\$\{allSelected \? '取消全选' : '全选'\}/);
+    assert.match(viewSource, /async downloadSelectedImages\(\)/);
+    assert.match(viewSource, /this\.images\.filter\(image => this\.selectedPaths\.has\(image\.path\)\)/);
+    assert.match(viewSource, /downloadMediaFile\([\s\S]*?\{ notify: false \}/);
+    assert.match(viewSource, /已下载 \$\{successCount\} 项/);
+});
+
+test('story image overlay exposes a mobile-safe download action with the original extension', async () => {
+    const overlaySource = fs.readFileSync(new URL('../apps/album/story-image-overlay.js', import.meta.url), 'utf8');
+    const cssSource = fs.readFileSync(new URL('../apps/album/album.css', import.meta.url), 'utf8');
+    const shellSource = fs.readFileSync(new URL('../phone/phone-shell.js', import.meta.url), 'utf8');
+    const { StoryImageOverlay } = await import(`../apps/album/story-image-overlay.js?test=story-download-${Date.now()}`);
+    const calls = [];
+    const legacyPhoneShell = {
+        _downloadImageFromViewer(...args) {
+            calls.push(args);
+        }
+    };
+    const overlay = new StoryImageOverlay({
+        albumData: { getStoryFloors: () => [] },
+        phoneShell: legacyPhoneShell
+    });
+
+    assert.equal(overlay.getStoryImageDownloadName({ floor: 7, imageUrl: '/backgrounds/picture.webp?rev=1' }), 'story-image-7.webp');
+    assert.equal(overlay.getStoryImageDownloadName({ floor: 9, imageUrl: 'data:image/png;base64,AAAA' }), 'story-image-9.png');
+    assert.equal(overlay.getStoryImageDownloadName({ floor: 10, imageUrl: 'data:image/webp;base64,AAAA' }), 'story-image-10.webp');
+    await overlay.downloadStoryImage({ floor: 7, imageUrl: '/backgrounds/picture.webp?rev=1' });
+    assert.deepEqual(calls, [['/backgrounds/picture.webp?rev=1', 'story-image-7.webp']]);
+    assert.match(overlaySource, /class="phone-story-image-download"/);
+    assert.match(overlaySource, /phoneShell\?\.downloadImage === 'function'/);
+    assert.match(overlaySource, /phoneShell\?\._downloadImageFromViewer/);
+    assert.match(overlaySource, /import\('\/scripts\/file-export\.js'\)/);
+    assert.match(overlaySource, /fileExport\.downloadBlobWithRuntime\(blob, fileName/);
+    assert.match(cssSource, /#phone-story-image-overlay-root \.phone-story-image-download/);
+    assert.match(shellSource, /async downloadImage\(imageUrl, filename = 'phone-image'\)/);
+});
+
+test('story image actions share a bottom-right menu that opens upward', () => {
+    const overlaySource = fs.readFileSync(new URL('../apps/album/story-image-overlay.js', import.meta.url), 'utf8');
+    const cssSource = fs.readFileSync(new URL('../apps/album/album.css', import.meta.url), 'utf8');
+    const menuMarkup = overlaySource.match(/<details class="phone-story-image-menu">([\s\S]*?)<\/details>/)?.[1] || '';
+
+    assert.match(menuMarkup, /phone-story-image-flip/);
+    assert.match(menuMarkup, /查看 Tags/);
+    assert.doesNotMatch(menuMarkup, /返回图片/);
+    assert.match(menuMarkup, /phone-story-image-delete/);
+    assert.match(menuMarkup, /phone-story-image-download/);
+    assert.match(overlaySource, /showTagBack \? `[\s\S]*?phone-story-image-return/);
+    assert.match(overlaySource, /phone-story-image-return'[\s\S]*?showImageFront\(floor\.floor\)[\s\S]*?this\.render\(\)/);
+    assert.match(cssSource, /\.phone-story-image-menu\s*\{[^}]*bottom:\s*10px[^}]*right:\s*10px/s);
+    assert.match(cssSource, /\.phone-story-image-menu-items\s*\{[^}]*bottom:\s*38px/s);
+    assert.match(cssSource, /\.phone-story-image-return\s*\{[^}]*right:\s*10px[^}]*bottom:\s*10px/s);
+    assert.doesNotMatch(cssSource, /\.phone-story-image-flip\s*\{[^}]*position:\s*absolute/s);
 });
 
 test('story image card is top-aligned below the tavern toolbar on mobile', () => {
@@ -622,10 +787,24 @@ test('story tag generation uses the phone LLM API and stores returned tags', asy
             },
             promptManager: {
                 ensureLoaded() {},
-                renderPromptForFeature(app, feature) {
+                renderPromptForFeature(app, feature, variables) {
                     assert.equal(app, 'story');
-                    assert.equal(feature, 'override');
-                    return 'STORY OVERRIDE PROMPT';
+                    if (feature === 'override') return 'STORY OVERRIDE PROMPT';
+                    assert.equal(feature, 'generate');
+                    assert.equal(variables.imageProvider, 'novelai');
+                    assert.equal(variables.imageModel, 'nai-diffusion-5-full');
+                    return 'STORY GENERATION PROMPT';
+                }
+            },
+            imageGenerationManager: {
+                resolveProvider() {
+                    return 'novelai';
+                },
+                getConfig() {
+                    return {
+                        provider: 'novelai',
+                        model: 'nai-diffusion-5-full'
+                    };
                 }
             },
             worldbookManager: {
@@ -696,19 +875,21 @@ test('story tag generation uses the phone LLM API and stores returned tags', asy
         assert.equal(worldbookAppKey, 'story');
         assert.deepEqual(requestMessages.map(item => item.name || item.role), [
             'SYSTEM (正文生图破限词)',
+            'SYSTEM (正文生图提示词)',
             'SYSTEM (角色卡)',
             'SYSTEM (用户Persona)',
             'SYSTEM (世界书)',
             'user'
         ]);
         assert.equal(requestMessages[0].content, 'STORY OVERRIDE PROMPT');
-        assert.match(requestMessages[1].content, /Character description\./);
-        assert.match(requestMessages[2].content, /User persona details\./);
-        assert.equal(requestMessages[3].content, 'SELECTED STORY WORLDBOOK');
-        assert.match(requestMessages[4].content, /Selected story floor 7/);
-        assert.match(requestMessages[4].content, /Look back\./);
-        assert.match(requestMessages[4].content, /A rainy scene\./);
-        assert.doesNotMatch(requestMessages[4].content, /PHONE HIDDEN|USER HIDDEN|MEMORY HIDDEN/);
+        assert.equal(requestMessages[1].content, 'STORY GENERATION PROMPT');
+        assert.match(requestMessages[2].content, /Character description\./);
+        assert.match(requestMessages[3].content, /User persona details\./);
+        assert.equal(requestMessages[4].content, 'SELECTED STORY WORLDBOOK');
+        assert.match(requestMessages[5].content, /Selected story floor 7/);
+        assert.match(requestMessages[5].content, /Look back\./);
+        assert.match(requestMessages[5].content, /A rainy scene\./);
+        assert.doesNotMatch(requestMessages[5].content, /PHONE HIDDEN|USER HIDDEN|MEMORY HIDDEN/);
         assert.equal(memoryFilterCallCount, 2);
         assert.equal(savedTags, '女性, 雨夜街道, looking back');
         assert.equal(app.storyImageOverlay.tagBackFloors.has(7), true);
@@ -858,4 +1039,184 @@ test('story image generation uses the story provider route, uploads the result, 
         if (originalDocument === undefined) delete globalThis.document;
         else globalThis.document = originalDocument;
     }
+});
+
+
+test('story fixed-character variables resolve to WeChat tags before the provider route', async () => {
+    const originalWindow = globalThis.window;
+    const originalDocument = globalThis.document;
+    const message = { is_user: false, mes: 'Two people meet.', extra: {} };
+    let providerPrompt = '';
+    let attached = null;
+    globalThis.window = {
+        addEventListener() {},
+        VirtualPhone: {
+            cachedWechatData: {
+                data: {
+                    contacts: [{
+                        id: 'contact-1',
+                        name: 'RainyDay',
+                        nickname: 'RainyDay',
+                        remark: '晓雨姐',
+                        realName: '林晓雨、Xiaoyu Lin',
+                        naiPromptTags: 'girl, black hair, blue eyes'
+                    }],
+                    userInfo: {
+                        name: '晚晚',
+                        realName: '程昕晚',
+                        naiPromptTags: 'girl, silver hair, green eyes'
+                    }
+                },
+                _getContactAliasValues(contact) {
+                    return [contact.name, contact.nickname, contact.remark, contact.realName];
+                }
+            },
+            imageGenerationManager: {
+                storage: null,
+                async generate(options) {
+                    providerPrompt = options.prompt;
+                    return {
+                        provider: 'comfyui',
+                        model: 'workflow-test',
+                        imageUrl: 'data:image/png;base64,AAAA'
+                    };
+                }
+            },
+            imageManager: {
+                async _uploadToServer() {
+                    return '/backgrounds/phone_story_fixed.png';
+                }
+            }
+        }
+    };
+    globalThis.document = {
+        hidden: false,
+        head: { appendChild() {} },
+        addEventListener() {},
+        getElementById() { return null; },
+        createElement() { return {}; }
+    };
+
+    try {
+        const { AlbumApp } = await import(`../apps/album/album-app.js?test=fixed-tags-${Date.now()}`);
+        const app = new AlbumApp({ showNotification() {} }, {});
+        const fixedCharacterList = app._formatStoryFixedImageCharacters();
+        assert.match(fixedCharacterList, /\{\{晓雨姐\}\}/);
+        assert.match(fixedCharacterList, /\{\{RainyDay\}\}/);
+        assert.match(fixedCharacterList, /\{\{林晓雨\}\}/);
+        assert.match(fixedCharacterList, /\{\{程昕晚\}\}/);
+        assert.doesNotMatch(fixedCharacterList, /\{\{晚晚\}\}|\{\{user\}\}/);
+        assert.doesNotMatch(fixedCharacterList, /black hair|blue eyes/);
+        assert.match(
+            app._injectStoryFixedImageCharacters('【当前已有固定形象tags角色】\n', fixedCharacterList),
+            /【当前已有固定形象tags角色】\n- .*\{\{晓雨姐\}\}/
+        );
+        app.albumData = {
+            getStoryImageSettings: () => ({ autoPreviewEnabled: false }),
+            getStoryFloor: () => ({ floor: 7, message, tags: '' }),
+            async setStoryFloorTags() {},
+            async attachStoryFloorImage(floor, imageUrl, details) {
+                attached = { floor, imageUrl, details };
+            }
+        };
+
+        const compatibleUserAliases = app._resolveStoryFixedImageTags('{{程昕晚}}, {{晚晚}}, {{user}}');
+        assert.equal(compatibleUserAliases.unresolved.length, 0);
+        assert.equal(
+            compatibleUserAliases.prompt,
+            'girl, silver hair, green eyes, girl, silver hair, green eyes, girl, silver hair, green eyes'
+        );
+
+        const rawTags = 'scenePrompt:\n2girls, indoors\n\ncharacter1:\ngirl, {{林晓雨}}, standing\ncenter1:\nx:0.3,y:0.5\n\ncharacter2:\ngirl, {{程昕晚}}, sitting\ncenter2:\nx:0.7,y:0.5';
+        const result = await app.generateStoryImage(7, rawTags);
+
+        assert.equal(result.success, true);
+        assert.match(providerPrompt, /girl, black hair, blue eyes, standing/);
+        assert.match(providerPrompt, /girl, silver hair, green eyes, sitting/);
+        assert.doesNotMatch(providerPrompt, /\{\{林晓雨\}\}/);
+        assert.doesNotMatch(providerPrompt, /\{\{程昕晚\}\}/);
+        assert.equal(attached.details.tags, app._cleanStoryTags(rawTags));
+        assert.equal(attached.details.provider, 'comfyui');
+    } finally {
+        if (originalWindow === undefined) delete globalThis.window;
+        else globalThis.window = originalWindow;
+        if (originalDocument === undefined) delete globalThis.document;
+        else globalThis.document = originalDocument;
+    }
+});
+
+test('story image generation rejects unknown fixed-character variables before provider dispatch', async () => {
+    const originalWindow = globalThis.window;
+    const originalDocument = globalThis.document;
+    const message = { is_user: false, mes: 'Unknown person.', extra: {} };
+    let providerCalls = 0;
+    globalThis.window = {
+        addEventListener() {},
+        VirtualPhone: {
+            imageGenerationManager: {
+                async generate() {
+                    providerCalls += 1;
+                    return {};
+                }
+            }
+        }
+    };
+    globalThis.document = {
+        hidden: false,
+        head: { appendChild() {} },
+        addEventListener() {},
+        getElementById() { return null; },
+        createElement() { return {}; }
+    };
+
+    try {
+        const { AlbumApp } = await import(`../apps/album/album-app.js?test=unknown-fixed-tags-${Date.now()}`);
+        const app = new AlbumApp({ showNotification() {} }, {});
+        app.albumData = {
+            getStoryImageSettings: () => ({ autoPreviewEnabled: false }),
+            getStoryFloor: () => ({ floor: 7, message, tags: '' }),
+            async setStoryFloorTags() {}
+        };
+
+        const result = await app.generateStoryImage(7, 'character1:\ngirl, {{不存在的角色}}');
+        assert.equal(result.success, false);
+        assert.match(String(result.error?.message || ''), /未找到.*\{\{不存在的角色\}\}/);
+        assert.equal(providerCalls, 0);
+    } finally {
+        if (originalWindow === undefined) delete globalThis.window;
+        else globalThis.window = originalWindow;
+        if (originalDocument === undefined) delete globalThis.document;
+        else globalThis.document = originalDocument;
+    }
+});
+
+test('story overlay deletion keeps tags, clears image references and rejects stale actions', async () => {
+    const { StoryImageOverlay } = await import('../apps/album/story-image-overlay.js');
+    const { data, context } = createFixture();
+    context.chat[1].extra.phone_story_image = { tags: '1girl, rain', imageUrl: '/backgrounds/story.png' };
+    const floor = data.getStoryFloor(1);
+    const previousWindow = globalThis.window;
+    let deleted = 0;
+    let refreshed = 0;
+    let confirmed = true;
+    data.deleteImage = async path => {
+        deleted++;
+        await data._cleanupStoryMessageReferences(path);
+        return { success: true };
+    };
+    globalThis.window = { confirm: () => confirmed, dispatchEvent: () => {} };
+    try {
+        const overlay = new StoryImageOverlay({ albumData: data, isStoryImageBusy: () => false, isStoryTagBusy: () => false });
+        overlay.refresh = () => refreshed++;
+        confirmed = false;
+        assert.equal(await overlay.deleteStoryImage(floor), false);
+        assert.equal(deleted, 0);
+        confirmed = true;
+        assert.equal(await overlay.deleteStoryImage(floor), true);
+        assert.equal(data.getStoryFloor(1).imageUrl, '');
+        assert.equal(data.getStoryFloor(1).tags, '1girl, rain');
+        assert.equal(refreshed, 1);
+        assert.equal(await overlay.deleteStoryImage(floor), false);
+        assert.equal(deleted, 1);
+    } finally { globalThis.window = previousWindow; }
 });

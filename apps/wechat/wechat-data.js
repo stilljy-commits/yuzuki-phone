@@ -475,11 +475,13 @@ export class WechatData {
                     const contacts = (Array.isArray(data.contacts) ? data.contacts : [])
                         .filter(contact => contact && typeof contact === 'object')
                         .map((contact) => {
-                            const name = String(contact.name || contact.nickname || contact.remark || '').trim();
-                            if (!name) return null;
+                            const nickname = String(contact.nickname || contact.name || contact.realName || contact.remark || '').trim();
+                            if (!nickname) return null;
                             Object.assign(contact, {
-                                name,
-                                remark: String(contact.remark || '').trim()
+                                name: nickname,
+                                nickname,
+                                remark: String(contact.remark || '').trim(),
+                                realName: String(contact.realName || contact.alias || '').trim()
                             });
                             return contact;
                         })
@@ -740,14 +742,33 @@ export class WechatData {
     _getContactAliasValues(contact = {}) {
         const aliases = [];
         const seen = new Set();
-        [contact?.name, contact?.nickname, contact?.remark].forEach((value) => {
-            const alias = String(value || '').trim();
-            const key = this._normalizeLookupName(alias);
-            if (!alias || !key || seen.has(key)) return;
-            seen.add(key);
-            aliases.push(alias);
-        });
+        const pushAlias = (value) => {
+            const raw = String(value || '').trim();
+            if (!raw) return;
+            const candidates = [raw, ...raw.split(/[、,，/|｜；;]+/)]
+                .map(item => item.trim())
+                .filter(Boolean);
+            candidates.forEach((alias) => {
+                const key = this._normalizeLookupName(alias);
+                if (!key || seen.has(key)) return;
+                seen.add(key);
+                aliases.push(alias);
+            });
+        };
+        [contact?.name, contact?.nickname, contact?.remark, contact?.realName, contact?.alias]
+            .forEach(pushAlias);
+        if (Array.isArray(contact?.aliases)) contact.aliases.forEach(pushAlias);
         return aliases;
+    }
+
+    getContactDisplayName(contact = {}) {
+        return String(
+            contact?.remark
+            || contact?.nickname
+            || contact?.name
+            || contact?.realName
+            || ''
+        ).trim();
     }
 
     _contactMatchesAlias(contact, name, { loose = false } = {}) {
@@ -790,9 +811,9 @@ export class WechatData {
                 chat.contactId = contact.id;
                 changed = true;
             }
-            const nickname = String(contact.name || '').trim();
-            if (nickname && chat.name !== nickname) {
-                chat.name = nickname;
+            const displayName = this.getContactDisplayName(contact);
+            if (displayName && chat.name !== displayName) {
+                chat.name = displayName;
                 changed = true;
             }
         });
@@ -1350,6 +1371,7 @@ export class WechatData {
         if (!currentName || currentName === '我') {
             normalized.name = this._getRuntimeUserName();
         }
+        normalized.realName = String(normalized.realName || '').trim();
 
         normalized.ttsProvider = String(normalized.ttsProvider || '').trim();
         normalized.ttsVoice = String(normalized.ttsVoice || '').trim();
@@ -1371,6 +1393,7 @@ export class WechatData {
     _getDefaultUserInfo() {
         return {
             name: this._getRuntimeUserName(),
+            realName: '',
             wxid: 'wxid_' + Math.random().toString(36).substr(2, 9),
             avatar: '',
             signature: '',
@@ -2543,7 +2566,11 @@ export class WechatData {
     }
     
     updateUserInfo(info) {
-        Object.assign(this.data.userInfo, info);
+        const updates = info && typeof info === 'object' ? { ...info } : {};
+        if (Object.prototype.hasOwnProperty.call(updates, 'realName')) {
+            updates.realName = String(updates.realName || '').trim();
+        }
+        Object.assign(this.data.userInfo, updates);
         this.saveData();
     }
 
@@ -2880,7 +2907,8 @@ export class WechatData {
             );
             if (existingSingleChat) {
                 if (!existingSingleChat.contactId && contactByName?.id) existingSingleChat.contactId = contactByName.id;
-                if (contactByName?.name) existingSingleChat.name = contactByName.name;
+                const contactDisplayName = this.getContactDisplayName(contactByName);
+                if (contactDisplayName) existingSingleChat.name = contactDisplayName;
                 if ((!existingSingleChat.avatar || existingSingleChat.avatar === '👤') && (contactByName?.avatar || chatInfo.avatar)) {
                     existingSingleChat.avatar = contactByName?.avatar || chatInfo.avatar;
                 }
@@ -2898,7 +2926,7 @@ export class WechatData {
         const chat = {
             id: chatInfo.id || Date.now().toString(),
             contactId: contactByName?.id || chatInfo.contactId,
-            name: chatType === 'group' ? chatInfo.name : (contactByName?.name || chatInfo.name),
+            name: chatType === 'group' ? chatInfo.name : (this.getContactDisplayName(contactByName) || chatInfo.name),
             type: chatType,
             avatar: chatInfo.avatar,
             background: this._getInitialChatBackground(chatInfo.background),
@@ -2927,7 +2955,8 @@ export class WechatData {
         );
         if (chat && contact) {
             if (!chat.contactId) chat.contactId = contact.id;
-            if (contact.name) chat.name = contact.name;
+            const displayName = this.getContactDisplayName(contact);
+            if (displayName) chat.name = displayName;
         }
         return chat;
     }
@@ -3483,6 +3512,10 @@ export class WechatData {
             && Number.isFinite(Number(message.mainChatOrder));
         if (shouldOrderedInsert) {
             const nextOrder = Number(message.mainChatOrder);
+            const nextTimestamp = Number(message.timestamp);
+            const hasNextTimestamp = message.timestamp !== null
+                && message.timestamp !== ''
+                && Number.isFinite(nextTimestamp);
             let insertIndex = replayInsertAnchorIndex >= 0
                 ? Math.min(replayInsertAnchorIndex, this.data.messages[chatId].length)
                 : this.data.messages[chatId].length;
@@ -3494,11 +3527,18 @@ export class WechatData {
                 if (String(existing.batchId || '') !== String(message.batchId || '')) continue;
                 foundSameMainChatBatch = true;
                 const existingOrder = Number(existing.mainChatOrder);
-                if (Number.isFinite(existingOrder) && existingOrder > nextOrder) {
+                const existingTimestamp = Number(existing.timestamp);
+                const hasExistingTimestamp = existing.timestamp !== null
+                    && existing.timestamp !== ''
+                    && Number.isFinite(existingTimestamp);
+                const timelineOrder = hasExistingTimestamp && hasNextTimestamp && existingTimestamp !== nextTimestamp
+                    ? existingTimestamp - nextTimestamp
+                    : (Number.isFinite(existingOrder) ? existingOrder - nextOrder : -1);
+                if (timelineOrder > 0) {
                     insertIndex = i;
                     break;
                 }
-                if (Number.isFinite(existingOrder) && existingOrder <= nextOrder) {
+                if (timelineOrder <= 0) {
                     insertIndex = i + 1;
                 }
             }
@@ -3787,13 +3827,16 @@ getWeekday(date) {
     }
 
     addContact(contact) {
-        const safeName = String(contact?.name || contact?.nickname || '').trim();
-        if (!safeName) return null;
+        const safeNickname = String(contact?.nickname || contact?.name || '').trim();
+        if (!safeNickname) return null;
         const safeRemark = String(contact?.remark || '').trim();
-        const existed = this.findContactAliasConflict([safeName, safeRemark].filter(Boolean));
+        const safeRealName = String(contact?.realName || contact?.alias || '').trim();
+        const existed = this.findContactAliasConflict([safeNickname, safeRemark, safeRealName].filter(Boolean));
         if (existed) {
             if (!existed.avatar && contact?.avatar) existed.avatar = contact.avatar;
             if (!existed.remark && contact?.remark) existed.remark = contact.remark;
+            if (!existed.realName && safeRealName) existed.realName = safeRealName;
+            if (!existed.nickname && safeNickname) existed.nickname = safeNickname;
             if (!existed.relation && contact?.relation) existed.relation = contact.relation;
             if (contact?.sourceApp) existed.sourceApp = contact.sourceApp;
             if (contact?.sourceLabel) existed.sourceLabel = contact.sourceLabel;
@@ -3801,14 +3844,17 @@ getWeekday(date) {
             if (contact?.honeySource) existed.honeySource = contact.honeySource;
             if (contact?.honeyVisibleIntro) existed.honeyVisibleIntro = contact.honeyVisibleIntro;
             if (contact?.honeyHiddenBackground) existed.honeyHiddenBackground = contact.honeyHiddenBackground;
-            if (!existed.letter && safeName) existed.letter = this.getFirstLetter(existed.name || safeName);
+            if (!existed.letter && safeNickname) existed.letter = this.getFirstLetter(this.getContactDisplayName(existed) || safeNickname);
+            this._syncSingleChatContactNames(this.data.chats, this.data.contacts);
             this.saveData();
             return existed;
         }
         const normalizedContact = {
             ...contact,
-            name: safeName,
-            remark: safeRemark
+            name: safeNickname,
+            nickname: safeNickname,
+            remark: safeRemark,
+            realName: safeRealName
         };
         this.data.contacts.push(normalizedContact);
         this.saveData();
@@ -3823,22 +3869,35 @@ getWeekday(date) {
             contact = this.findContactByAlias(safeContactId);
         }
         if (contact) {
-            const oldName = contact.name; // 记录旧名字
+            const oldAliases = this._getContactAliasValues(contact);
             const nextUpdates = { ...(updates || {}) };
+            if (Object.prototype.hasOwnProperty.call(nextUpdates, 'nickname')) {
+                nextUpdates.nickname = String(nextUpdates.nickname || '').trim();
+                nextUpdates.name = nextUpdates.nickname;
+            }
             if (Object.prototype.hasOwnProperty.call(nextUpdates, 'name')) {
                 nextUpdates.name = String(nextUpdates.name || '').trim();
+                nextUpdates.nickname = nextUpdates.name;
             }
             if (Object.prototype.hasOwnProperty.call(nextUpdates, 'remark')) {
                 nextUpdates.remark = String(nextUpdates.remark || '').trim();
             }
-            const nextName = nextUpdates.name || contact.name;
+            if (Object.prototype.hasOwnProperty.call(nextUpdates, 'realName')) {
+                nextUpdates.realName = String(nextUpdates.realName || '').trim();
+            }
+            const nextName = nextUpdates.name || contact.nickname || contact.name;
             const nextRemark = Object.prototype.hasOwnProperty.call(nextUpdates, 'remark')
                 ? nextUpdates.remark
                 : contact.remark;
+            const nextRealName = Object.prototype.hasOwnProperty.call(nextUpdates, 'realName')
+                ? nextUpdates.realName
+                : contact.realName;
             const hasIdentityUpdate = Object.prototype.hasOwnProperty.call(nextUpdates, 'name')
-                || Object.prototype.hasOwnProperty.call(nextUpdates, 'remark');
+                || Object.prototype.hasOwnProperty.call(nextUpdates, 'nickname')
+                || Object.prototype.hasOwnProperty.call(nextUpdates, 'remark')
+                || Object.prototype.hasOwnProperty.call(nextUpdates, 'realName');
             if (hasIdentityUpdate && this.findContactAliasConflict(
-                [nextName, nextRemark].filter(Boolean),
+                [nextName, nextRemark, nextRealName].filter(Boolean),
                 { excludeContactId: contact.id }
             )) {
                 return false;
@@ -3846,18 +3905,17 @@ getWeekday(date) {
             const hasAvatarUpdate = Object.prototype.hasOwnProperty.call(updates || {}, 'avatar');
             Object.assign(contact, nextUpdates);
 
-            // 🔥 新增：如果修改了名字，同步更新关联的聊天窗口名字
-            if (nextUpdates.name && nextUpdates.name !== oldName) {
-                const chat = this.getChatByContactId(contact.id || safeContactId);
-                if (chat) {
-                    chat.name = nextUpdates.name;
-                } else {
-                    // 兜底：兼容没有 contactId 的旧数据，通过旧名字匹配单聊
-                    const chatByName = this.data.chats.find(c => c.type !== 'group' && this._isSameLookupName(c.name, oldName));
-                    if (chatByName) {
-                        chatByName.name = nextUpdates.name;
+            if (hasIdentityUpdate) {
+                const displayName = this.getContactDisplayName(contact);
+                this.data.chats.forEach((chat) => {
+                    if (chat.type === 'group') return;
+                    const linkedById = String(chat.contactId || '').trim() === String(contact.id || safeContactId).trim();
+                    const linkedByOldAlias = oldAliases.some(alias => this._isSameLookupName(chat.name, alias));
+                    if (linkedById || linkedByOldAlias) {
+                        chat.contactId = contact.id || chat.contactId;
+                        if (displayName) chat.name = displayName;
                     }
-                }
+                });
             }
 
             if (hasAvatarUpdate) {
@@ -3865,7 +3923,7 @@ getWeekday(date) {
                 this.data.chats.forEach((chat) => {
                     if (chat.type === 'group') return;
                     if (String(chat.contactId || '').trim() === String(contact.id || safeContactId).trim()
-                        || this._isSameLookupName(chat.name, oldName)
+                        || oldAliases.some(alias => this._isSameLookupName(chat.name, alias))
                         || this._isSameLookupName(chat.name, contact.name)) {
                         chat.avatar = nextAvatar;
                     }
@@ -4034,6 +4092,7 @@ getWeekday(date) {
             contact?.name,
             contact?.remark,
             contact?.nickname,
+            contact?.realName,
             typeof contactOrName === 'string' ? contactOrName : ''
         ].map(value => this._normalizeLookupName(value)).filter(Boolean));
         const canUseStableIds = visibility.contactIds.length > 0 && candidateIds.size > 0;
@@ -4227,13 +4286,13 @@ getWeekday(date) {
             const database = await readImportantCharacterDatabase();
             if (this.data !== originalData || getContactGenerationScope(SillyTavern.getContext()) !== scope) throw new Error('已切换作品或聊天，本次资料未写入。');
             if (!database.characters.length) throw new Error(database.message);
-            const selfNames = new Set([context.name1, this.data.userInfo?.name].filter(Boolean).map(name => this._normalizeLookupName(name)));
+            const selfNames = new Set([context.name1, this.data.userInfo?.name, this.data.userInfo?.realName].filter(Boolean).map(name => this._normalizeLookupName(name)));
             let added = 0, updated = 0, skipped = 0;
             for (const character of database.characters) {
                 if (selfNames.has(this._normalizeLookupName(character.name))) { skipped++; continue; }
                 let contact = this.findContactAliasConflict([character.name]);
                 if (!contact) {
-                    contact = { id: `contact_${Date.now()}_${Math.random()}`, name: character.name, gender: character.gender,
+                    contact = { id: `contact_${Date.now()}_${Math.random()}`, name: character.name, nickname: character.name, realName: character.name, gender: character.gender,
                         avatar: '', remark: '', relation: '', letter: this.getFirstLetter(character.name) };
                     this.data.contacts.push(contact); added++;
                 } else updated++;
@@ -4246,6 +4305,8 @@ getWeekday(date) {
 
     _applyDatabaseCharacterProfile(contact, character) {
         if (!contact || !character) return;
+        if (!contact.nickname) contact.nickname = contact.name || character.name;
+        if (!contact.realName) contact.realName = character.name;
         if (this._normalizeGenderValue(contact.gender) === 'unknown' && character.gender !== 'unknown') contact.gender = character.gender;
         if (!contact.detailedProfile || contact.detailedProfile.origin !== 'manual') contact.detailedProfile = databaseCharacterProfile(character);
     }
@@ -4308,15 +4369,17 @@ async loadContactsFromCharacter({ replaceExisting = false } = {}) {
         let addedCount = 0;
         let addedGroupCount = 0;
         const selfNameKey = normalizeName(context?.name1 || '用户');
+        const selfNameKeys = new Set([context?.name1, this.data.userInfo?.name, this.data.userInfo?.realName].filter(Boolean).map(normalizeName));
 
         const ensureContact = (rawName, options = {}) => {
-            const displayName = String(rawName || '').trim();
-            const key = normalizeName(displayName);
-            if (!displayName || !key || key === selfNameKey) return null;
+            const nickname = String(options.nickname || rawName || '').trim();
+            const key = normalizeName(nickname);
+            if (!nickname || !key || key === selfNameKey || [nickname, options.realName].some(name => selfNameKeys.has(normalizeName(name)))) return null;
 
             const existed = this.findContactAliasConflict([
-                displayName,
-                String(options.remark || '').trim()
+                nickname,
+                String(options.remark || '').trim(),
+                String(options.realName || '').trim()
             ].filter(Boolean));
             if (existed) return { contact: existed, created: false };
 
@@ -4324,10 +4387,12 @@ async loadContactsFromCharacter({ replaceExisting = false } = {}) {
             const avatar = options.avatar || '';
             const newContact = {
                 id: `contact_${Date.now()}_${Math.random()}`,
-                name: displayName,
+                name: nickname,
+                nickname,
                 avatar,
                 remark: options.remark || '',
-                letter: this.getFirstLetter(displayName),
+                realName: options.realName || '',
+                letter: this.getFirstLetter(options.remark || nickname),
                 relation,
                 gender: this._normalizeGenderValue(options.gender)
             };
@@ -4337,14 +4402,18 @@ async loadContactsFromCharacter({ replaceExisting = false } = {}) {
 
         generatedData.contacts.forEach(contact => {
             const result = ensureContact(contact?.name, {
+                nickname: contact?.nickname || contact?.name || '',
                 avatar: contact?.avatar || '',
                 relation: contact?.relation || '',
                 remark: contact?.remark || '',
+                realName: contact?.realName || '',
                 gender: contact?.gender || ''
             });
             if (result?.created) addedCount++;
-            const databaseCharacter = database.characters.find(c => normalizeName(c.name) === normalizeName(result?.contact?.name));
-            if (databaseCharacter) this._applyDatabaseCharacterProfile(result.contact, databaseCharacter);
+            const contactAliases = result?.contact ? this._getContactAliasValues(result.contact) : [];
+            const generatedAliases = [contact?.name, contact?.nickname, contact?.realName, contact?.remark];
+            const databaseCharacter = database.characters.find(c => [...contactAliases, ...generatedAliases].some(alias => normalizeName(alias) === normalizeName(c.name)));
+            if (result?.contact && databaseCharacter) this._applyDatabaseCharacterProfile(result.contact, databaseCharacter);
             const parsedGender = this._normalizeGenderValue(contact?.gender);
             if (result?.contact && parsedGender !== 'unknown') {
                 const currentGender = this.getContactGender(result.contact.id || result.contact.name);
@@ -4379,8 +4448,9 @@ async loadContactsFromCharacter({ replaceExisting = false } = {}) {
                     if (!cleaned || !memberKey || memberKey === selfNameKey || groupMemberKeys.has(memberKey)) return;
 
                     // 若该成员本身在通讯录里，优先使用通讯录中的规范名称
-                    const existedContact = this.data.contacts.find(c => normalizeName(c.name) === memberKey);
-                    const finalName = existedContact?.name || cleaned;
+                    const existedContact = this.findContactByAlias(cleaned)
+                        || this.data.contacts.find(c => normalizeName(c.name) === memberKey);
+                    const finalName = this.getContactDisplayName(existedContact) || cleaned;
                     const finalKey = normalizeName(finalName);
                     if (!finalKey || finalKey === selfNameKey || groupMemberKeys.has(finalKey)) return;
 
@@ -4517,17 +4587,34 @@ async buildContactPrompt(context, { database = null } = {}) {
         promptManager.ensureLoaded();
     }
 
-    const loadContactsPrompt = promptManager.getPromptForFeature('wechat', 'loadContacts');
+    const promptVariables = { user: userName };
+    const loadContactsOverridePrompt = promptManager.renderPromptForFeature?.(
+        'wechat',
+        'loadContactsOverride',
+        promptVariables
+    ) || promptManager.getPromptForFeature('wechat', 'loadContactsOverride');
+    const loadContactsPrompt = promptManager.renderPromptForFeature?.(
+        'wechat',
+        'loadContacts',
+        promptVariables
+    ) || promptManager.getPromptForFeature('wechat', 'loadContacts');
+    if (!loadContactsOverridePrompt) {
+        throw new Error('未找到智能加载联系人破限提示词');
+    }
     if (!loadContactsPrompt) {
         throw new Error('未找到智能加载联系人提示词');
     }
 
-    const messages = [];
+    const messages = [{
+        role: 'system',
+        content: loadContactsOverridePrompt
+    }];
 
     await window.VirtualPhone?.worldbookManager?.appendWorldbookMessages?.(messages, 'wechat');
     if (useDatabase) messages.push({ role: 'system', content: formatCharacterDatabaseContext(database) });
 
     const charCardParts = [
+        `【角色信息】`,
         `【当前主角角色卡】`,
         `姓名：${charName}`,
         description ? `描述：${description}` : '',
@@ -4545,11 +4632,6 @@ async buildContactPrompt(context, { database = null } = {}) {
     messages.push({
         role: 'system',
         content: `【聊天记录节选】共${history.total}条有效记录；最近${history.recent}条，加较早${history.older}条抽样。长消息分段节选，未出现不代表人物不存在。\n${history.text || '暂无聊天记录'}`
-    });
-
-    messages.push({
-        role: 'system',
-        content: '以上是故事的参考背景。现在你是一个数据分析助手，不是角色扮演AI。请根据以下用户信息、最近聊天记录和上方故事背景，生成专属于用户的微信联系人列表、群聊和手机初始时间。'
     });
 
     const userInfoParts = [
@@ -4736,6 +4818,92 @@ parseAIResponse(text) {
         let rawLine = String(line || '').trim();
         if (!rawLine) return null;
 
+        const cleanOptionalField = (value = '') => {
+            const cleaned = String(value || '').trim();
+            return /^(?:无|没有|未设置|暂无|none|null|-|—)$/i.test(cleaned) ? '' : cleaned;
+        };
+        const labeledFields = {};
+        const labeledPattern = /(真实姓名\s*(?:\/|／)?\s*(?:其他)?别名|真实姓名|其他别名|昵称\s*(?:\/|／)?\s*网名|昵称|网名|备注|关系|真实性别|性别|姓名)\s*[:：]\s*([^；;\n]+)/gi;
+        let labeledMatch;
+        while ((labeledMatch = labeledPattern.exec(rawLine)) !== null) {
+            const label = String(labeledMatch[1] || '').replace(/\s+/g, '');
+            labeledFields[label] = cleanOptionalField(labeledMatch[2]);
+        }
+        const hasLabeledIdentity = Object.keys(labeledFields)
+            .some(label => !['性别', '真实性别', '关系'].includes(label));
+        if (hasLabeledIdentity) {
+            const nickname = cleanOptionalField(
+                labeledFields['昵称/网名']
+                || labeledFields['昵称／网名']
+                || labeledFields.昵称
+                || labeledFields.网名
+                || labeledFields.姓名
+            );
+            const realName = cleanOptionalField(
+                labeledFields['真实姓名/其他别名']
+                || labeledFields['真实姓名／其他别名']
+                || labeledFields.真实姓名
+                || labeledFields.其他别名
+            );
+            const remark = cleanOptionalField(labeledFields.备注);
+            const relation = cleanOptionalField(labeledFields.关系);
+            const gender = normalizeParsedGender(labeledFields.真实性别 || labeledFields.性别);
+            const name = nickname || realName || remark;
+            if (!name) return null;
+            return {
+                name,
+                nickname: name,
+                avatar: '',
+                relation,
+                remark,
+                realName,
+                gender
+            };
+        }
+
+        // 新版智能加载联系人格式：昵称-备注-真实姓名-性别
+        const compactIdentityWithRemarkMatch = rawLine.match(
+            new RegExp(`^(.+?)\\s*[-－—–]\\s*(.+?)\\s*[-－—–]\\s*(.+?)\\s*[-－—–]\\s*${genderTokenPattern}$`, 'i')
+        );
+        if (compactIdentityWithRemarkMatch) {
+            const nickname = cleanOptionalField(compactIdentityWithRemarkMatch[1]);
+            const remark = cleanOptionalField(compactIdentityWithRemarkMatch[2]);
+            const realName = cleanOptionalField(compactIdentityWithRemarkMatch[3]);
+            const gender = normalizeParsedGender(compactIdentityWithRemarkMatch[4]);
+            const name = nickname || realName || remark;
+            if (!name) return null;
+            return {
+                name,
+                nickname: name,
+                avatar: '',
+                relation: '',
+                remark,
+                realName,
+                gender
+            };
+        }
+
+        // 兼容上一版格式：昵称-真实姓名-性别
+        const compactIdentityMatch = rawLine.match(
+            new RegExp(`^(.+?)\\s*[-－—–]\\s*(.+?)\\s*[-－—–]\\s*${genderTokenPattern}$`, 'i')
+        );
+        if (compactIdentityMatch) {
+            const nickname = cleanOptionalField(compactIdentityMatch[1]);
+            const realName = cleanOptionalField(compactIdentityMatch[2]);
+            const gender = normalizeParsedGender(compactIdentityMatch[3]);
+            const name = nickname || realName;
+            if (!name) return null;
+            return {
+                name,
+                nickname: name,
+                avatar: '',
+                relation: '',
+                remark: '',
+                realName,
+                gender
+            };
+        }
+
         let gender = extractTrailingGender(rawLine);
         if (gender !== 'unknown') {
             rawLine = stripInlineGender(rawLine);
@@ -4756,9 +4924,11 @@ parseAIResponse(text) {
         if (!name) return null;
         return {
             name,
+            nickname: name,
             avatar: '',
             relation,
             remark: '',
+            realName: '',
             gender
         };
     };

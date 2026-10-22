@@ -10,12 +10,14 @@ const VIDEO_EXT_RE = /\.(?:mp4|webm|mov|m4v)$/i;
 
 const STORY_IMAGE_SETTING_KEYS = Object.freeze({
     autoEnabled: 'phone-story-image-auto-enabled',
+    manualTagsAutoImageEnabled: 'phone-story-image-manual-tags-auto-image-enabled',
     // Keep the original storage key so existing user choices carry over.
     autoPreviewEnabled: 'phone-story-image-completion-notice-enabled'
 });
 
 const STORY_IMAGE_SETTING_DEFAULTS = Object.freeze({
     autoEnabled: false,
+    manualTagsAutoImageEnabled: true,
     autoPreviewEnabled: true
 });
 
@@ -41,6 +43,17 @@ export class AlbumData {
     constructor(storage) {
         this.storage = storage;
         this.deletedKey = 'phone_album_deleted_paths';
+        this._mediaCache = null;
+        this._mediaCacheIsComplete = false;
+    }
+
+    invalidateMediaCache() {
+        this._mediaCache = null;
+        this._mediaCacheIsComplete = false;
+    }
+
+    hasCompleteMediaCache() {
+        return Array.isArray(this._mediaCache) && this._mediaCacheIsComplete;
     }
 
     getStoryImageSettings() {
@@ -377,7 +390,13 @@ export class AlbumData {
         this.storage?._debouncedSaveChat?.();
     }
 
-    getMedia() {
+    getMedia(options = {}) {
+        const fast = options.fast === true;
+        const force = options.force === true;
+        if (!force && Array.isArray(this._mediaCache) && (fast || this._mediaCacheIsComplete)) {
+            return this._mediaCache;
+        }
+
         const items = new Map();
         const deleted = this._getDeletedSet();
         let order = 0;
@@ -414,11 +433,18 @@ export class AlbumData {
             });
         };
 
-        this._scanKnownStores(addImage);
-        this._scanRuntimeData(addImage);
-        this._scanLocalStorage(addImage);
+        if (fast) {
+            this._scanAlbumUploadIndex(addImage);
+            const imageManager = window.VirtualPhone?.imageManager;
+            this._scanValue(imageManager?.cache, '本地上传', addImage);
+            this._scanValue(this.storage?.get?.('phone-card-time-image'), '时间卡片背景', addImage);
+        } else {
+            this._scanKnownStores(addImage);
+            this._scanRuntimeData(addImage);
+            this._scanLocalStorage(addImage);
+        }
 
-        return Array.from(items.values())
+        const result = Array.from(items.values())
             .sort((a, b) => {
                 const createdDiff = Number(b.createdAt || 0) - Number(a.createdAt || 0);
                 return createdDiff || (a.order - b.order);
@@ -427,6 +453,13 @@ export class AlbumData {
                 ...image,
                 sourceKey: this.getImageSourceKey(image)
             }));
+        this._mediaCache = result;
+        this._mediaCacheIsComplete = !fast;
+        return result;
+    }
+
+    refreshMediaCache() {
+        return this.getMedia({ force: true, fast: false });
     }
 
     getImages() {
@@ -500,6 +533,7 @@ export class AlbumData {
         await this.cleanupReferences(normalized);
         await this._markDeleted(normalized);
         await this._removeUploadIndexPath(normalized);
+        this.invalidateMediaCache();
 
         return {
             success: true,
@@ -541,6 +575,8 @@ export class AlbumData {
             }
         }
 
+        this.invalidateMediaCache();
+
         return { successCount, failCount, results };
     }
 
@@ -549,6 +585,7 @@ export class AlbumData {
         if (!normalized || !this.isManagedMediaPath(normalized)) return false;
         await this._markDeleted(normalized);
         await this._removeUploadIndexPath(normalized);
+        this.invalidateMediaCache();
         return true;
     }
 
@@ -744,13 +781,8 @@ export class AlbumData {
         this._scanValue(wechatData?.contacts, '头像', addImage);
         this._scanValue(wechatData?.chats, '微信聊天', addImage);
         this._scanValue(wechatData?.moments, '微信聊天', addImage);
-        try {
-            const chats = wechatData?.chats || [];
-            chats.forEach(chat => {
-                const messages = phone.wechatApp.wechatData.getMessages?.(chat.id);
-                this._scanValue(messages, `微信聊天:${chat.name || chat.id}`, addImage);
-            });
-        } catch (e) { }
+        // 只扫描已经在内存中的消息，避免打开相册时把每个微信会话从存储中同步加载出来。
+        this._scanValue(wechatData?.messages, '微信聊天', addImage);
         this._scanValue(phone.weiboApp?.weiboData, '微博', addImage);
         this._scanValue(phone.honeyApp?.honeyData, '蜜语', addImage);
         this._scanValue(phone.diaryApp?.diaryData, '日记', addImage);
